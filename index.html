@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Nūr — Islamic Knowledge & Tools</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Amiri+Quran&family=Amiri:wght@400;700&family=Cormorant+Garamond:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="bg-pattern"></div>
+
+  <header class="topbar">
+    <a href="#/" class="brand"><span class="brand-mark">✦</span> Nūr</a>
+    <button id="prayer-widget" class="prayer-widget" aria-label="Prayer times">
+      <span class="pw-icon">☾</span>
+      <span id="pw-text" class="pw-text">Loading…</span>
+    </button>
+    <nav>
+      <a href="#/quran" data-nav="quran">Qur'an</a>
+      <a href="#/tafsir" data-nav="tafsir">Tafsir</a>
+      <a href="#/hadith" data-nav="hadith">Hadith</a>
+      <a href="#/library" data-nav="library">Library</a>
+      <a href="#/bookmarks" data-nav="bookmarks">Saved</a>
+      <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">⚙</button>
+    </nav>
+  </header>
+
+  <main id="app"></main>
+
+  <button id="translator-fab" class="translator-fab" aria-label="Open translator" title="Translator">
+    <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h8M8 5c0 5-1.5 9-4 11"/><path d="M5 10c1.5 3 4 5.5 7 7"/><path d="M13 20l4-10 4 10"/><path d="M14.5 16h5"/></svg>
+  </button>
+
+  <button id="to-top" class="to-top" aria-label="Back to top">↑</button>
+
+  <audio id="shared-audio" preload="none"></audio>
+  <div id="word-tip" class="word-tip" hidden></div>
+
+  <!-- Generic Modal -->
+  <div id="modal" class="modal-overlay" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true">
+      <button class="modal-close" id="modal-close" aria-label="Close">×</button>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal-overlay" hidden>
+    <div class="modal-card settings-card" role="dialog" aria-modal="true">
+      <button class="modal-close" id="settings-close" aria-label="Close">×</button>
+      <h3 class="modal-title">Settings</h3>
+      <div class="settings-section">
+        <label class="settings-label">Theme</label>
+        <div class="theme-picker" id="theme-picker">
+          <button data-theme="dark" class="theme-swatch dark">Dark</button>
+          <button data-theme="light" class="theme-swatch light">Light</button>
+          <button data-theme="sepia" class="theme-swatch sepia">Sepia</button>
+          <button data-theme="night" class="theme-swatch night">Night</button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <label class="settings-label">Font size</label>
+        <input type="range" id="font-scale" min="0.85" max="1.4" step="0.05" value="1" class="slider-input" />
+        <span id="font-scale-label" class="slider-label">100%</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Translator Modal -->
+  <div id="translator-modal" class="modal-overlay" hidden>
+    <div class="tr-card" role="dialog" aria-modal="true">
+      <header class="tr-head">
+        <span class="tr-title">✦ Translator</span>
+        <button class="modal-close-inline" id="tr-close" aria-label="Close">×</button>
+      </header>
+      <div class="tr-langbar">
+        <div id="tr-from-mount" class="tr-lang-mount"></div>
+        <button class="tr-swap" id="tr-swap" aria-label="Swap">⇄</button>
+        <div id="tr-to-mount" class="tr-lang-mount"></div>
+      </div>
+      <div class="tr-texts">
+        <div class="tr-pane">
+          <div class="tr-pane-head"><span>Source</span><span id="tr-src-count">0</span></div>
+          <textarea id="tr-src" placeholder="Type or paste text to translate…" spellcheck="false"></textarea>
+        </div>
+        <div class="tr-pane">
+          <div class="tr-pane-head"><span>Translation</span><span id="tr-tgt-count">0</span></div>
+          <textarea id="tr-tgt" placeholder="Translation appears here…" readonly></textarea>
+        </div>
+      </div>
+      <footer class="tr-foot">
+        <span id="tr-status" class="tr-status"></span>
+        <div class="tr-actions">
+          <button class="btn btn-ghost" id="tr-copy" type="button">Copy</button>
+          <button class="btn btn-primary" id="tr-go" type="button">Translate</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- HOME -->
+  <template id="tpl-home">
+    <section class="view container hero">
+      <p class="bismillah">بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ</p>
+      <h1>Nūr</h1>
+      <p class="lead">A quiet place to study classical tafsir, read the Qur'an, search the six books of hadith, and explore the classical library.</p>
+
+      <div id="home-prayer" class="home-prayer"></div>
+      <div id="home-event" class="home-event" hidden></div>
+      <div id="home-continue" class="continue-wrap" hidden></div>
+      <div id="home-ayah" class="daily-wrap"></div>
+
+      <div class="cards">
+        <a class="card" href="#/quran" style="--i:0"><span class="card-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5.5C4.5 4 8 4 12 6c4-2 7.5-2 10-.5V19c-2.5-1.5-6-1.5-10 .5-4-2-7.5-2-10-.5V5.5Z"/><path d="M12 6v13.5"/></svg></span><h3>Qur'an</h3><p>All 114 surahs with audio, translations, and WbW.</p><span class="card-cta">Open <i>→</i></span></a>
+        <a class="card" href="#/tafsir" style="--i:1"><span class="card-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 13 9 5 9-5"/></svg></span><h3>Tafsir</h3><p>Classical commentary from the great mufassirūn.</p><span class="card-cta">Open <i>→</i></span></a>
+        <a class="card" href="#/hadith" style="--i:2"><span class="card-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v16"/><path d="M9 4v16"/><path d="m13.5 5 4-1 3.5 15-4 1-3.5-15Z"/></svg></span><h3>Hadith</h3><p>The six books, searchable across all collections.</p><span class="card-cta">Open <i>→</i></span></a>
+        <a class="card" href="#/library" style="--i:3"><span class="card-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/><path d="M8.5 11h5M11 8.5v5" opacity="0"/><path d="M8.5 9.5h5M8.5 12.5h3"/></svg></span><h3>Library</h3><p>Search classical Islamic books on Turath and read the page.</p><span class="card-cta">Open <i>→</i></span></a>
+      </div>
+    </section>
+  </template>
+
+  <!-- QURAN -->
+  <template id="tpl-quran">
+    <section class="view container">
+      <div class="page-head">
+        <h2>The Noble Qur'an</h2>
+        <p>Uthmani text with translation, audio, and word-by-word.</p>
+      </div>
+
+      <div class="panel controls">
+        <div class="field grow"><span class="field-label">Surah</span><div id="q-surah-mount"></div></div>
+        <div class="field grow"><span class="field-label">Juz</span><div id="q-juz-mount"></div></div>
+        <div class="field grow"><span class="field-label">Translation</span><div id="q-trans-mount"></div></div>
+        <div class="field grow"><span class="field-label">Reciter</span><div id="q-reciter-mount"></div></div>
+      </div>
+
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="q-translit" /> Transliteration</label>
+        <label class="toggle"><input type="checkbox" id="q-wbw" /> Word-by-word</label>
+        <label class="toggle"><input type="checkbox" id="q-tafsir-links" checked /> Tafsir/Context links</label>
+        <label class="toggle"><input type="checkbox" id="q-tajweed" /> Tajweed colors</label>
+      </div>
+
+      <div class="audio-bar">
+        <button class="audio-btn" id="q-play-surah" data-state="paused">
+          <span class="audio-icon">▶</span><span class="audio-label">Play surah</span>
+        </button>
+        <div class="audio-info">
+          <span id="q-audio-title">—</span>
+          <span id="q-audio-status"></span>
+        </div>
+        <button class="icon-btn" id="q-random" title="Random ayah">🎲</button>
+      </div>
+
+      <div id="q-out" class="reader"></div>
+      <div class="pager">
+        <button class="btn btn-ghost" id="q-prev">← Previous</button>
+        <button class="btn btn-ghost" id="q-next">Next →</button>
+      </div>
+    </section>
+  </template>
+
+  <!-- TAFSIR -->
+  <template id="tpl-tafsir">
+    <section class="view container">
+      <div class="page-head">
+        <h2>Tafsir</h2>
+        <p>Choose a verse, pick a mufassir, and read.</p>
+      </div>
+      <div class="panel controls tafsir-controls">
+        <div class="field grow"><span class="field-label">Surah</span><div id="t-surah-mount"></div></div>
+        <label class="field narrow"><span class="field-label">Ayah</span><input type="number" id="t-ayah" min="1" value="1" /></label>
+        <div class="field grow"><span class="field-label">Mufassir</span><div id="t-source-mount"></div></div>
+        <button class="btn btn-primary" id="t-go">Load tafsir</button>
+        <button class="btn btn-ghost" id="t-compare">Compare</button>
+      </div>
+      <div class="field" id="t-compare-row" hidden>
+        <span class="field-label">Compare with</span>
+        <div id="t-source2-mount"></div>
+      </div>
+      <div class="translate-row" id="t-translate-row">
+        <label class="switch-row">
+          <span class="switch-text"><b>Translate tafsir to English</b><small>Uses Google Translate · May take longer</small></span>
+          <span class="switch"><input type="checkbox" id="t-translate-en" /><span class="slider"></span></span>
+        </label>
+      </div>
+      <div id="t-out"></div>
+      <div id="t-related"></div>
+    </section>
+  </template>
+
+  <!-- HADITH -->
+  <template id="tpl-hadith">
+    <section class="view container">
+      <div class="page-head">
+        <h2>Hadith Library</h2>
+        <p>Pick a collection, or search across all six at once.</p>
+      </div>
+      <div id="h-chips" class="chips"></div>
+      <div class="panel controls">
+        <label class="field grow"><span class="field-label">Search</span><input type="search" id="h-q" placeholder="Choose a collection first…" disabled autocomplete="off" /></label>
+        <label class="toggle"><input type="checkbox" id="h-search-all" /> Search all 6 collections</label>
+        <label class="toggle"><input type="checkbox" id="h-ar" checked /> Arabic text</label>
+      </div>
+      <p id="h-status" class="status"></p>
+      <div id="h-list" class="hadith-scroll scroll-area"></div>
+      <div class="pager"><button class="btn btn-ghost" id="h-more" hidden>Show more</button></div>
+    </section>
+  </template>
+
+  <!-- LIBRARY (Turath search) -->
+  <template id="tpl-library">
+    <section class="view container">
+      <div class="page-head">
+        <h2>Library</h2>
+        <p>Search the classical books of Turath. Open any result to read the page.</p>
+      </div>
+
+      <form id="l-form" class="panel controls lib-form" autocomplete="off">
+        <label class="field grow"><span class="field-label">Search</span><input type="search" id="l-q" placeholder="Search in Arabic, e.g. الإسلام" dir="auto" /></label>
+        <div class="field lib-autocomplete">
+          <label class="field-label" for="l-author">Author</label>
+          <input type="search" id="l-author" placeholder="Search authors, e.g. الرازي" autocomplete="off" aria-autocomplete="list" aria-controls="l-author-options" aria-expanded="false" />
+          <div id="l-author-options" class="lib-suggestions" role="listbox" hidden></div>
+        </div>
+        <div class="field lib-autocomplete">
+          <label class="field-label" for="l-book">Book</label>
+          <input type="search" id="l-book" placeholder="Search book titles" autocomplete="off" aria-autocomplete="list" aria-controls="l-book-options" aria-expanded="false" />
+          <div id="l-book-options" class="lib-suggestions" role="listbox" hidden></div>
+        </div>
+        <label class="field"><span class="field-label">Order</span>
+          <select id="l-sort">
+            <option value="">Relevance</option>
+            <option value="page">Page order</option>
+          </select>
+        </label>
+        <button class="btn btn-primary" id="l-go" type="submit">Search</button>
+      </form>
+
+      <div id="l-filters" class="filters" hidden></div>
+      <p id="l-status" class="status"></p>
+      <div id="l-out"></div>
+
+      <div id="l-pager" class="pager lib-pager" hidden>
+        <button class="btn btn-ghost" id="l-prev" type="button">← Previous</button>
+        <span id="l-page-info" class="page-info"></span>
+        <button class="btn btn-ghost" id="l-next" type="button">Next →</button>
+      </div>
+    </section>
+  </template>
+
+  <!-- LIBRARY READER (one page of a Turath book) -->
+  <template id="tpl-reader">
+    <section class="view container">
+      <a href="#/library" class="back-link">← Back to search</a>
+      <div class="page-head">
+        <h2 id="r-title">Loading…</h2>
+        <p id="r-author"></p>
+      </div>
+
+      <div class="panel reader-bar">
+        <button class="btn btn-ghost btn-sm" type="button" data-r-prev>← Prev</button>
+        <span id="r-loc" class="r-loc"></span>
+        <button class="btn btn-ghost btn-sm" type="button" data-r-next>Next →</button>
+      </div>
+      <div class="panel reader-bar reader-tools">
+        <input type="number" id="r-jump" class="r-jump" min="1" step="1" placeholder="#" aria-label="Go to position in the book" title="Position in the book" />
+        <button class="btn btn-ghost btn-sm" id="r-go" type="button">Go</button>
+        <button class="icon-btn" id="r-bm" type="button" title="Bookmark this page" aria-label="Bookmark this page">☆</button>
+        <button class="btn btn-ghost btn-sm" id="r-translate" type="button">Translate</button>
+        <a class="btn btn-ghost btn-sm" id="r-dl" href="#" download>Download book (JSON)</a>
+      </div>
+
+      <p id="r-headings" class="lib-heads"></p>
+      <div id="r-out"></div>
+      <div id="r-trans" class="lib-trans" hidden></div>
+
+      <div class="pager">
+        <button class="btn btn-ghost" type="button" data-r-prev>← Previous page</button>
+        <button class="btn btn-ghost" type="button" data-r-next>Next page →</button>
+      </div>
+
+      <details id="r-author-box" class="r-details" hidden>
+        <summary>About the author</summary>
+        <div id="r-author-body" class="r-details-body"></div>
+      </details>
+      <details id="r-toc" class="r-details" hidden>
+        <summary>Contents</summary>
+        <div class="toc-list"></div>
+      </details>
+    </section>
+  </template>
+
+  <!-- BOOKMARKS -->
+  <template id="tpl-bookmarks">
+    <section class="view container">
+      <div class="page-head">
+        <h2>Bookmarks</h2>
+        <p>Verses, hadiths and library pages you've saved.</p>
+      </div>
+      <div id="b-list" class="bookmarks-list"></div>
+    </section>
+  </template>
+
+  <script src="script.js"></script>
+</body>
+</html>

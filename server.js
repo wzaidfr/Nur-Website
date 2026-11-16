@@ -1,0 +1,319 @@
+// server.js — Nūr web server + Turath API.
+// The turath-sdk package only works in Node.js, so the browser talks to this
+// server, and this server calls the SDK.
+//
+// SDK signatures (from the turath-sdk 1.1.0 README):
+//   search(query, options?)  options: { author, book, category, page, precision, sortField }
+//   getPage(bookId, pageNumber)
+//   getBookInfo(id)
+//   getBookFile(id)
+//   getAuthor(id)
+
+import express from "express";
+import { promises as fs } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import * as turath from "turath-sdk";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || "127.0.0.1";
+
+const app = express();
+app.disable("x-powered-by");
+
+/* ---------- small helpers ---------- */
+
+function httpError(status, message) {
+  const e = new Error(message);
+  e.status = status;
+  return e;
+}
+
+function intParam(value, name, { required = true, min = 1, max = 100000000 } = {}) {
+  if (value === undefined || value === null || value === "") {
+    if (required) throw httpError(400, `Missing "${name}".`);
+    return undefined;
+  }
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw httpError(400, `"${name}" must be a whole number between ${min} and ${max}.`);
+  }
+  return n;
+}
+
+// Tiny in-memory cache so repeated clicks do not hit turath.io again.
+const cache = new Map();
+const CACHE_TTL = 10 * 60 * 1000;
+const CACHE_MAX = 300;
+async function cached(key, fn) {
+  const hit = cache.get(key);
+  if (hit && hit.expires > Date.now()) return hit.value;
+  const value = await fn();
+  cache.set(key, { value, expires: Date.now() + CACHE_TTL });
+  if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
+  return value;
+}
+
+// The public SDK supports author/book IDs, while Turath's searchable catalog is
+// distributed as a SQLite metadata snapshot.
+const CATALOG_URL = "https://files.turath.io/data-v4.sqlite";
+const CATALOG_PATH = path.join(os.tmpdir(), "nur-turath-data-v4.sqlite");
+const CATALOG_TTL = 7 * 24 * 60 * 60 * 1000;
+let catalogPromise;
+
+async function downloadCatalog() {
+  const tempPath = `${CATALOG_PATH}.${process.pid}.tmp`;
+  const response = await fetch(CATALOG_URL);
+  if (!response.ok) throw new Error(`Turath catalog download failed (${response.status}).`);
+
+  try {
+    await fs.writeFile(tempPath, Buffer.from(await response.arrayBuffer()));
+    await fs.rename(tempPath, CATALOG_PATH);
+  } catch (e) {
+    await fs.rm(tempPath, { force: true });
+    throw e;
+  }
+}
+
+async function getCatalog() {
+  if (!catalogPromise) {
+    catalogPromise = (async () => {
+      let fresh = false;
+      try {
+        const stat = await fs.stat(CATALOG_PATH);
+        fresh = stat.size > 1_000_000 && Date.now() - stat.mtimeMs < CATALOG_TTL;
+      } catch (e) {
+        if (e.code !== "ENOENT") throw e;
+      }
+      if (!fresh) await downloadCatalog();
+
+      const db = new DatabaseSync(CATALOG_PATH, { readOnly: true });
+      if (!db.prepare("SELECT data_version FROM snapshot_meta").get()) {
+        db.close();
+        throw new Error("The Turath catalog snapshot is invalid.");
+      }
+      return db;
+    })().catch((e) => {
+      catalogPromise = null;
+      throw e;
+    });
+  }
+  return catalogPromise;
+}
+
+function findCatalogMatches(db, type, query) {
+  const pattern = `$.name`;
+  const order = `CASE WHEN instr(json_extract(json, '${pattern}'), ?) = 1 THEN 0 ELSE 1 END, json_extract(json, '${pattern}')`;
+  if (type === "author") {
+    return db.prepare(`
+      SELECT id, json
+      FROM authors
+      WHERE instr(json_extract(json, '${pattern}'), ?) > 0
+      ORDER BY ${order}
+      LIMIT 20
+    `).all(query, query).map(({ id, json }) => {
+      const author = JSON.parse(json);
+      return { id, name: author.name, bookCount: Array.isArray(author.books) ? author.books.length : 0 };
+    });
+  }
+
+  return db.prepare(`
+    SELECT books.id, books.json, authors.json AS author_json
+    FROM books
+    LEFT JOIN authors ON authors.id = json_extract(books.json, '$.author_id')
+    WHERE instr(json_extract(books.json, '${pattern}'), ?) > 0
+    ORDER BY CASE WHEN instr(json_extract(books.json, '${pattern}'), ?) = 1 THEN 0 ELSE 1 END,
+      json_extract(books.json, '${pattern}')
+    LIMIT 20
+  `).all(query, query).map(({ id, json, author_json }) => {
+    const book = JSON.parse(json);
+    const author = author_json ? JSON.parse(author_json) : null;
+    return { id, name: book.name, authorName: author ? author.name : "" };
+  });
+}
+
+// Prints the "shape" of each kind of answer once, in the terminal, so problems
+// are easy to diagnose.
+const shapeLogged = new Set();
+function logShape(name, value) {
+  if (shapeLogged.has(name)) return;
+  shapeLogged.add(name);
+  try {
+    const keys = value && typeof value === "object" ? Object.keys(value) : typeof value;
+    console.log(`[turath] ${name} returned:`, keys);
+  } catch {
+    /* ignore */
+  }
+}
+
+const handle = (fn) => async (req, res) => {
+  try {
+    res.json(await fn(req, res));
+  } catch (e) {
+    const message = e && e.message ? e.message : String(e);
+    const status = e.status || (/not found|404/i.test(message) ? 404 : 502);
+    console.error(`[turath] ${req.path} failed:`, message);
+    res.status(status).json({
+      error: status === 502 ? `Turath request failed: ${message}` : message,
+    });
+  }
+};
+
+/* ---------- security headers & CORS (local only) ---------- */
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  // allow the page itself (localhost) and the file:// case (origin "null")
+  if (origin === "null" || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin || "")) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+  res.setHeader("Access-Control-Allow-Methods", "GET");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  next();
+});
+
+/* ---------- the website files (only these three are served) ---------- */
+
+const sendOpts = { headers: { "Cache-Control": "no-cache" } };
+app.get("/", (req, res) => res.sendFile(path.join(__dirname, "index.html"), sendOpts));
+for (const file of ["index.html", "script.js", "style.css"]) {
+  app.get(`/${file}`, (req, res) => res.sendFile(path.join(__dirname, file), sendOpts));
+}
+
+/* ---------- API ---------- */
+
+app.get("/api/health", (req, res) => res.json({ ok: true }));
+
+// GET /api/turath/catalog?type=author&q=الرازي
+app.get(
+  "/api/turath/catalog",
+  handle(async (req) => {
+    const type = String(req.query.type ?? "");
+    if (type !== "author" && type !== "book") throw httpError(400, 'Type must be "author" or "book".');
+
+    const q = String(req.query.q ?? "").trim().replace(/\s+/g, " ");
+    if (q.length < 2) return { type, query: q, results: [] };
+    if (q.length > 100) throw httpError(400, "That catalog search is too long (100 characters maximum).");
+
+    const db = await getCatalog();
+    return { type, query: q, results: findCatalogMatches(db, type, q) };
+  }),
+);
+
+// GET /api/turath/search?q=...&page=2&author=44&book=147927&category=6&sort=page
+app.get(
+  "/api/turath/search",
+  handle(async (req) => {
+    const q = String(req.query.q ?? "").trim();
+    if (!q) throw httpError(400, "Enter something to search for.");
+    if (q.length > 300) throw httpError(400, "That search is too long (300 characters maximum).");
+
+    const options = {};
+    const page = intParam(req.query.page, "page", { required: false, max: 100000 });
+    if (page && page > 1) options.page = page;
+    const author = intParam(req.query.author, "author", { required: false });
+    if (author) options.author = author;
+    const book = intParam(req.query.book, "book", { required: false });
+    if (book) options.book = book;
+    const category = intParam(req.query.category, "category", { required: false });
+    if (category) options.category = category;
+    if (req.query.sort === "page" && turath.SortField && turath.SortField.PageId !== undefined) {
+      options.sortField = turath.SortField.PageId;
+    }
+
+    const key = "search:" + JSON.stringify([q, options]);
+    const raw = await cached(key, () =>
+      turath.search(q, Object.keys(options).length ? options : undefined),
+    );
+    logShape("search", raw);
+
+    const list = Array.isArray(raw) ? raw : (raw && (raw.data ?? raw.results)) || [];
+    if (list.length) logShape("search result item", list[0]);
+    const countNum = Number(raw && raw.count);
+    return {
+      query: q,
+      page: page || 1,
+      count: Number.isFinite(countNum) ? countNum : list.length,
+      results: Array.isArray(list) ? list : [],
+    };
+  }),
+);
+
+// GET /api/turath/page?book=147927&page=5
+app.get(
+  "/api/turath/page",
+  handle(async (req) => {
+    const book = intParam(req.query.book, "book");
+    const page = intParam(req.query.page, "page", { max: 10000000 });
+    const raw = await cached(`page:${book}:${page}`, () => turath.getPage(book, page));
+    logShape("page", raw);
+    const text =
+      typeof raw === "string"
+        ? raw
+        : (raw && (raw.text ?? (raw.page && raw.page.text) ?? raw.content)) || "";
+    const meta = (raw && typeof raw === "object" && (raw.meta ?? raw.metadata)) || {};
+    return { book, page, text: String(text), meta };
+  }),
+);
+
+// GET /api/turath/book/147927
+app.get(
+  "/api/turath/book/:id",
+  handle(async (req) => {
+    const id = intParam(req.params.id, "id");
+    const raw = await cached(`book:${id}`, () => turath.getBookInfo(id));
+    logShape("book info", raw);
+    const { indexes = null, ...rest } = raw && typeof raw === "object" ? raw : {};
+    return { id, meta: (raw && raw.meta) || rest, indexes };
+  }),
+);
+
+// GET /api/turath/author/44
+app.get(
+  "/api/turath/author/:id",
+  handle(async (req) => {
+    const id = intParam(req.params.id, "id");
+    const raw = await cached(`author:${id}`, () => turath.getAuthor(id));
+    logShape("author", raw);
+    return { id, author: raw };
+  }),
+);
+
+// GET /api/turath/book/147927/file[?download=1]  (full JSON dump; can be large)
+app.get(
+  "/api/turath/book/:id/file",
+  handle(async (req, res) => {
+    const id = intParam(req.params.id, "id");
+    const raw = await turath.getBookFile(id); // not cached: can be very large
+    logShape("book file", raw);
+    if (req.query.download) {
+      res.setHeader("Content-Disposition", `attachment; filename="turath-book-${id}.json"`);
+    }
+    return raw;
+  }),
+);
+
+app.use("/api", (req, res) => res.status(404).json({ error: "Unknown API route." }));
+
+/* ---------- start ---------- */
+
+const server = app.listen(PORT, HOST, () => {
+  console.log(`\nNūr is running →  http://localhost:${PORT}\n`);
+  console.log("Open that address in your browser. Press Ctrl+C here to stop.\n");
+});
+
+server.on("error", (e) => {
+  if (e.code === "EADDRINUSE") {
+    console.error(`Port ${PORT} is already in use. Close the other program, or start with a different port:`);
+    console.error(`  PowerShell:  $env:PORT=3001; npm start`);
+  } else {
+    console.error("Server error:", e);
+  }
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (e) => console.error("Unhandled rejection:", e));
