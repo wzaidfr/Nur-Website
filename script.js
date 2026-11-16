@@ -77,6 +77,12 @@ const APP = (() => {
     const message = e?.message || String(e);
     return `<div class="notice error"><strong>Something went wrong.</strong>${message === "Something went wrong." ? "" : ` ${esc(message)}`}</div>`;
   };
+  function localTranslationSource(html) {
+    const formatted = String(html ?? "")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(?:p|div|li|blockquote|h[1-6])\s*>/gi, "\n\n");
+    return plainText(formatted).replace(/\n{3,}/g, "\n\n").trim();
+  }
   const notice = (msg) => `<div class="notice">${esc(msg)}</div>`;
   const regexEscape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   function fetchTimeout(ms) {
@@ -87,7 +93,11 @@ const APP = (() => {
 
   async function getJSON(url, opts) {
     const res = await fetch(url, opts);
-    if (!res.ok) throw new Error(`Request failed (${res.status})`);
+    if (!res.ok) {
+      let body = null;
+      try { body = await res.json(); } catch {}
+      throw new Error(body?.error || `Request failed (${res.status})`);
+    }
     return res.json();
   }
   const memo = (key, fn) => (cache[key] ??= fn().catch((e) => { delete cache[key]; throw e; }));
@@ -278,7 +288,7 @@ const APP = (() => {
   function router() {
     navToken++;
     stopRecitation();
-    closeModal(); closeSettings(); closeTranslator();
+    closeModal(); closeSettings(); closeLanguagePopover();
     const [, route = "", a, b] = location.hash.replace(/^#/, "").split("/");
     $$("[data-nav]").forEach((l) => l.classList.toggle("active", l.dataset.nav === route || (route === "read" && l.dataset.nav === "library")));
     window.scrollTo({ top: 0 });
@@ -557,17 +567,16 @@ const APP = (() => {
     else playAyahAudio(surah, ayah);
   }
 
-  const recitation = { active: false, recognition: null, finalSegments: [], interimText: "" };
+  const recitation = { active: false, recognition: null, audioConfig: null, tokenTimer: 0 };
+  const RECITATION_MIN_WORD_ACCURACY = 90;
   function syncQuranModeControls() {
     const disabled = recitation.active || Boolean($("#q-memorization")?.checked);
     if ($("#q-wbw")) $("#q-wbw").disabled = disabled;
-    if ($("#q-tajweed")) $("#q-tajweed").disabled = disabled;
   }
   function normalizeArabic(text) {
     return String(text || "")
       .normalize("NFD")
       .replace(/[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0640]/g, "")
-      .replace(/[أإآٱ]/g, "ا").replace(/[ى]/g, "ي").replace(/ة/g, "ه")
       .replace(/[^\u0621-\u064A\u066E-\u06D3\u06FA-\u06FC]/g, "");
   }
   function renderRecitationWords() {
@@ -585,48 +594,6 @@ const APP = (() => {
       el.replaceChildren(fragment);
     });
   }
-  function editDistanceAtMostOne(a, b) {
-    if (a === b) return 0;
-    if (Math.abs(a.length - b.length) > 1) return 2;
-    let i = 0, j = 0, edits = 0;
-    while (i < a.length && j < b.length) {
-      if (a[i] === b[j]) { i++; j++; continue; }
-      if (++edits > 1) return edits;
-      if (a.length > b.length) i++;
-      else if (b.length > a.length) j++;
-      else { i++; j++; }
-    }
-    if (i < a.length || j < b.length) edits++;
-    return edits;
-  }
-  function wordMatchScore(spoken, target) {
-    const a = normalizeArabic(spoken), b = normalizeArabic(target);
-    if (!a || !b) return 0;
-    if (a === b) return 1;
-    if (a.length < 4 || b.length < 4) return 0;
-    const distance = editDistanceAtMostOne(a, b);
-    return distance <= 1 && Math.max(a.length, b.length) <= Math.min(a.length, b.length) + 1 ? 0.75 : 0;
-  }
-  function applyRecitationMatches() {
-    const wordEls = $$(".recitation-word", $("#q-out"));
-    wordEls.forEach((el) => el.classList.remove("recitation-current", "recitation-matched"));
-    const transcript = `${recitation.finalSegments.join(" ")} ${recitation.interimText}`.trim();
-    const spoken = transcript.split(/\s+/).filter(Boolean), finalCount = recitation.finalSegments.join(" ").split(/\s+/).filter(Boolean).length;
-    let cursor = 0, matchedCount = 0;
-    spoken.forEach((token, tokenIndex) => {
-      let found = -1, score = 0;
-      for (let i = cursor; i < Math.min(cursor + 6, wordEls.length); i++) {
-        const candidate = wordMatchScore(token, wordEls[i].textContent);
-        if (candidate > score) { found = i; score = candidate; }
-      }
-      if (found < 0) return;
-      cursor = found + 1;
-      if (tokenIndex < finalCount) { wordEls[found].classList.add("recitation-matched"); matchedCount++; }
-      else wordEls[found].classList.add("recitation-current");
-    });
-    const status = $("#q-recitation-status");
-    if (status) status.textContent = `Listening · ${matchedCount} words matched`;
-  }
   function syncMemorizationMask() {
     const checkbox = $("#q-memorization");
     if (!checkbox) return;
@@ -635,64 +602,170 @@ const APP = (() => {
   }
   function stopRecitation(message = "Recitation stopped.") {
     recitation.active = false;
-    if (recitation.recognition) {
-      recitation.recognition.onend = null;
-      try { recitation.recognition.stop(); } catch {}
-      recitation.recognition = null;
+    clearInterval(recitation.tokenTimer);
+    recitation.tokenTimer = 0;
+    const recognition = recitation.recognition;
+    recitation.recognition = null;
+    if (recognition) {
+      try {
+        recognition.stopContinuousRecognitionAsync(
+          () => recognition.close(),
+          () => recognition.close(),
+        );
+      } catch {
+        recognition.close();
+      }
     }
+    if (recitation.audioConfig) { recitation.audioConfig.close(); recitation.audioConfig = null; }
     const button = $("#q-recitation");
     if (button) { button.textContent = "Start recitation"; button.setAttribute("aria-pressed", "false"); }
     const status = $("#q-recitation-status");
     if (status) status.textContent = message;
     syncQuranModeControls();
+    const out = $("#q-out");
+    const ayah = out && $(".ayah-ar[data-surah]", out);
+    if (ayah && !$("#q-memorization")?.checked && !$("#q-wbw")?.checked) enableTajweed(+ayah.dataset.surah);
   }
   async function startRecitation() {
     const status = $("#q-recitation-status"), button = $("#q-recitation");
-    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Recognition) { status.textContent = "Arabic speech recognition is not supported in this browser."; return; }
-    if (!navigator.mediaDevices?.getUserMedia) { status.textContent = "Microphone access requires HTTPS or localhost."; return; }
-    button.disabled = true; status.textContent = "Requesting microphone access…";
+    const SpeechSDK = window.SpeechSDK;
+    if (!SpeechSDK) { status.textContent = "The recitation service could not be loaded. Check your internet connection and reload."; return; }
+    if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext) {
+      status.textContent = "Recitation needs microphone access over HTTPS. On a phone, use this site's secure HTTPS address.";
+      return;
+    }
+    button.disabled = true; status.textContent = "Connecting to pronunciation assessment…";
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach((track) => track.stop());
-      const recognition = new Recognition();
-      recognition.lang = "ar-SA"; recognition.continuous = true; recognition.interimResults = true;
-      recitation.active = true; recitation.recognition = recognition; recitation.finalSegments = []; recitation.interimText = "";
-      const wbw = $("#q-wbw"), tajweed = $("#q-tajweed");
-      wbw.checked = false; tajweed.checked = false; Prefs.set("wbw", false); Prefs.set("tajweed", false);
+      const { token, region } = await getJSON(`${TURATH_BASE}/api/recitation/token`, fetchTimeout(15000));
+      const speechConfig = SpeechSDK.SpeechConfig.fromAuthorizationToken(token, region);
+      speechConfig.speechRecognitionLanguage = "ar-SA";
+      speechConfig.outputFormat = SpeechSDK.OutputFormat.Detailed;
+      const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+      recitation.audioConfig = audioConfig;
+      const ayahs = $$(".ayah-ar[data-ar]", $("#q-out"));
+      if (!ayahs.length) throw new Error("No Qur'an text is available to assess.");
+      const wbw = $("#q-wbw");
+      wbw.checked = false; Prefs.set("wbw", false);
       disableWbW($("#q-out"), []);
-      syncQuranModeControls();
       renderRecitationWords();
       $$(".recitation-word", $("#q-out")).forEach((word) => word.classList.remove("recitation-current", "recitation-matched"));
       if ($("#q-memorization").checked) syncMemorizationMask();
-      recognition.onresult = (event) => {
-        const interim = [];
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const text = event.results[i][0]?.transcript || "";
-          if (event.results[i].isFinal) recitation.finalSegments.push(text.trim());
-          else interim.push(text.trim());
-        }
-        recitation.interimText = interim.join(" ");
-        applyRecitationMatches();
-      };
-      recognition.onerror = (event) => {
-        if (["not-allowed", "service-not-allowed"].includes(event.error)) stopRecitation("Microphone or speech recognition permission was denied.");
-        else if (["audio-capture", "language-not-supported", "network"].includes(event.error)) stopRecitation(`Speech recognition is unavailable: ${event.error}.`);
-        else if (event.error !== "no-speech" && event.error !== "aborted") status.textContent = `Speech recognition error: ${event.error}.`;
-      };
-      recognition.onend = () => {
+
+      recitation.active = true;
+      syncQuranModeControls();
+      let ayahIndex = 0, nextWordIndex = 0, session = 0;
+      const setStatus = (text) => { if (recitation.active && status.isConnected) status.textContent = text; };
+      const recognitionError = (error) => {
         if (!recitation.active) return;
-        setTimeout(() => {
-          if (!recitation.active || recitation.recognition !== recognition) return;
-          try { recognition.start(); }
-          catch { status.textContent = "Speech recognition stopped. Tap Start recitation to try again."; stopRecitation(status.textContent); }
-        }, 250);
+        console.error("[recitation] Speech recognition failed:", error);
+        stopRecitation("Pronunciation assessment could not continue. Please try again.");
       };
-      recognition.start();
-      button.textContent = "Stop recitation"; button.setAttribute("aria-pressed", "true");
-      status.textContent = "Listening in Arabic…";
+      const startAyah = () => {
+        if (!recitation.active) return;
+        try {
+        const currentSession = ++session;
+        const referenceWords = $$(".recitation-word", ayahs[ayahIndex]);
+        const assessment = new SpeechSDK.PronunciationAssessmentConfig(
+          ayahs[ayahIndex].dataset.ar,
+          SpeechSDK.PronunciationAssessmentGradingSystem.HundredMark,
+          SpeechSDK.PronunciationAssessmentGranularity.Phoneme,
+          false,
+        );
+        const recognition = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+        assessment.applyTo(recognition);
+        recitation.recognition = recognition;
+        recognition.recognizing = (_sender, event) => {
+          if (!recitation.active || session !== currentSession) return;
+          const interimWords = String(event.result.text || "").split(/\s+/).filter(Boolean);
+          const expected = referenceWords[nextWordIndex];
+          referenceWords.forEach((word) => word.classList.remove("recitation-current"));
+          if (expected && interimWords.length &&
+              normalizeArabic(interimWords[interimWords.length - 1]) === normalizeArabic(expected.textContent)) {
+            expected.classList.add("recitation-current");
+          }
+        };
+        recognition.recognized = (_sender, event) => {
+          if (!recitation.active || session !== currentSession) return;
+          referenceWords.forEach((word) => word.classList.remove("recitation-current"));
+          if (event.result.reason !== SpeechSDK.ResultReason.RecognizedSpeech) {
+            setStatus(`Ayah ${ayahIndex + 1}: speech was not recognized. Please repeat it.`);
+            return;
+          }
+          let assessmentResult;
+          try {
+            const raw = event.result.properties.getProperty(SpeechSDK.PropertyId.SpeechServiceResponse_JsonResult);
+            assessmentResult = raw ? JSON.parse(raw).NBest?.[0]?.Words : null;
+          } catch (error) {
+            recognitionError(`Could not read the assessment result: ${error.message}`);
+            return;
+          }
+          if (!Array.isArray(assessmentResult) || !assessmentResult.length) {
+            setStatus("No words were confidently assessed. Please repeat the verse.");
+            return;
+          }
+          let rejected = false;
+          for (const spoken of assessmentResult) {
+            const expected = referenceWords[nextWordIndex];
+            const score = spoken.PronunciationAssessment || {};
+            if (!expected || normalizeArabic(spoken.Word) !== normalizeArabic(expected.textContent) ||
+                score.ErrorType !== "None" || !Number.isFinite(Number(score.AccuracyScore)) ||
+                Number(score.AccuracyScore) < RECITATION_MIN_WORD_ACCURACY) {
+              rejected = true;
+              break;
+            }
+            expected.classList.remove("recitation-current");
+            expected.classList.add("recitation-matched");
+            nextWordIndex++;
+          }
+          if (rejected) {
+            setStatus(`Ayah ${ayahIndex + 1}: a word needs correction. Repeat it carefully before continuing.`);
+            return;
+          }
+          if (nextWordIndex < referenceWords.length) {
+            setStatus(`Ayah ${ayahIndex + 1} · ${nextWordIndex} of ${referenceWords.length} words confirmed`);
+            return;
+          }
+          const completedAyah = ayahIndex + 1;
+          if (ayahIndex === ayahs.length - 1) {
+            stopRecitation(`Surah complete · ${completedAyah} ayahs assessed.`);
+            return;
+          }
+          setStatus(`Ayah ${completedAyah} confirmed. Pause briefly, then continue with ayah ${completedAyah + 1}.`);
+          session++;
+          const nextSession = session;
+          recognition.stopContinuousRecognitionAsync(() => {
+            recognition.close();
+            if (!recitation.active || session !== nextSession) return;
+            ayahIndex++;
+            nextWordIndex = 0;
+            startAyah();
+          }, (error) => recognitionError(error));
+        };
+        recognition.canceled = (_sender, event) => {
+          if (recitation.active && session === currentSession) recognitionError(event.errorDetails || event.errorCode);
+        };
+        recognition.startContinuousRecognitionAsync(
+          () => setStatus(`Listening to ayah ${ayahIndex + 1}`),
+          (error) => recognitionError(error),
+        );
+        } catch (error) {
+          recognitionError(error.message);
+        }
+      };
+
+      startAyah();
+      button.textContent = "Stop recitation";
+      button.setAttribute("aria-pressed", "true");
+      recitation.tokenTimer = setInterval(async () => {
+        try {
+          const refreshed = await getJSON(`${TURATH_BASE}/api/recitation/token`, fetchTimeout(15000));
+          if (recitation.active && recitation.recognition) recitation.recognition.authorizationToken = refreshed.token;
+        } catch (error) {
+          recognitionError(error.message);
+        }
+      }, 8 * 60 * 1000);
     } catch (error) {
-      stopRecitation(error.name === "NotAllowedError" ? "Microphone permission was denied." : `Could not start the microphone: ${error.message}`);
+      stopRecitation(`Could not start pronunciation assessment: ${error.message}`);
     } finally { button.disabled = false; }
   }
   async function quran(sNum = 1) {
@@ -722,14 +795,8 @@ const APP = (() => {
       return `<article class="ayah${isSajdah ? " sajdah" : ""}" data-ayah="${ay.numberInSurah}"><p class="ayah-ar" data-ar="${esc(arText)}" data-surah="${sNum}" data-ayah="${ay.numberInSurah}">${esc(arText)} <span class="ayah-no">﴿${toArabicNum(ay.numberInSurah)}﴾</span></p><p class="ayah-translit"${showTranslit ? "" : " hidden"}>${esc(translit.ayahs[i]?.text || "")}</p><p class="ayah-en">${esc(trans.ayahs[i].text)}</p><div class="ayah-actions"><button class="icon-btn bookmark ${bmClass}" data-surah="${sNum}" data-ayah="${ay.numberInSurah}" data-ar="${esc(arText)}" title="Bookmark">${bookmarked}</button><button class="icon-btn play-ayah" data-surah="${sNum}" data-ayah="${ay.numberInSurah}" title="Play ayah">▶</button><button class="icon-btn repeat-ayah" data-ayah="${ay.numberInSurah}" title="Repeat ×3">×3</button><a class="ayah-link tafsir-link" href="#/tafsir/${sNum}/${ay.numberInSurah}">Tafsir</a><button class="ayah-link asbab-link" data-surah="${sNum}" data-ayah="${ay.numberInSurah}">Context</button></div></article>`;
     }).join("")}<nav id="q-reading-pager" class="reading-pager" aria-label="Reading page navigation" hidden><button class="btn btn-ghost" id="q-reading-prev" type="button">← Previous page</button><span id="q-reading-page-info" class="reading-page-info" aria-live="polite"></span><button class="btn btn-primary" id="q-reading-next" type="button">Next page →</button></nav>`;
     $("#q-translit").checked = showTranslit; $("#q-translit").onchange = (e) => { Prefs.set("translit", e.target.checked); $$(".ayah-translit", out).forEach((el) => el.hidden = !e.target.checked); };
-    const readingView = $("#q-reading-view"), lineByLine = $("#q-line-by-line"), readingTranslation = $("#q-reading-translation");
+    const readingView = $("#q-reading-view");
     readingView.checked = Prefs.getBool("quranReadingView", false);
-    lineByLine.checked = Prefs.getBool("quranLineByLine", true);
-    readingTranslation.checked = Prefs.getBool("quranReadingTranslation", false);
-    if (readingView.checked && !Prefs.getBool("quranLineByLineConfigured", false)) {
-      lineByLine.checked = true;
-      Prefs.set("quranLineByLineConfigured", true);
-    }
     let readingPage = 1;
     function updateReadingPage(scrollToReader = false) {
       const ayahs = $$(".ayah", out), totalPages = Math.max(1, Math.ceil(ayahs.length / 16));
@@ -748,10 +815,6 @@ const APP = (() => {
     function syncReadingView() {
       const active = readingView.checked;
       out.classList.toggle("reading-view", active);
-      out.classList.toggle("reading-line-by-line", active && lineByLine.checked);
-      out.classList.toggle("reading-with-translation", active && readingTranslation.checked);
-      lineByLine.disabled = !active;
-      readingTranslation.disabled = !active;
       $$(".ayah-ar", out).forEach((el) => {
         el.classList.toggle("reading-playable", active);
         if (active) {
@@ -767,19 +830,9 @@ const APP = (() => {
         }
       });
       Prefs.set("quranReadingView", active);
-      Prefs.set("quranLineByLine", lineByLine.checked);
-      Prefs.set("quranReadingTranslation", readingTranslation.checked);
       updateReadingPage();
     }
-    readingView.onchange = () => {
-      if (readingView.checked && !Prefs.getBool("quranLineByLineConfigured", false)) {
-        lineByLine.checked = true;
-        Prefs.set("quranLineByLineConfigured", true);
-      }
-      syncReadingView();
-    };
-    lineByLine.onchange = () => { Prefs.set("quranLineByLineConfigured", true); syncReadingView(); };
-    readingTranslation.onchange = syncReadingView;
+    readingView.onchange = syncReadingView;
     syncReadingView();
     $("#q-reading-prev").onclick = () => { if (readingPage > 1) { readingPage--; updateReadingPage(true); } };
     $("#q-reading-next").onclick = () => {
@@ -802,36 +855,24 @@ const APP = (() => {
       else playAyahAudio(sNum, ayah, 1);
     });
 
-    /* Word-by-word and Tajweed colors both rewrite the Arabic text, so only one can be on at a time */
-    const wbwCb = $("#q-wbw"), tjCb = $("#q-tajweed");
+    /* Word-by-word text and Tajweed markup are mutually exclusive. */
+    const wbwCb = $("#q-wbw");
     wbwCb.checked = Prefs.getBool("wbw", false);
-    tjCb.checked = !wbwCb.checked && Prefs.getBool("tajweed", false);
-    if (wbwCb.checked) enableWbW(sNum, ar.ayahs); else if (tjCb.checked) enableTajweed(sNum);
+    if (wbwCb.checked) enableWbW(sNum, ar.ayahs); else enableTajweed(sNum);
     wbwCb.onchange = async (e) => {
       Prefs.set("wbw", e.target.checked);
-      if (e.target.checked) {
-        if (tjCb.checked) { tjCb.checked = false; Prefs.set("tajweed", false); }
-        enableWbW(sNum, ar.ayahs);
-      } else disableWbW(out, ar.ayahs);
-    };
-    tjCb.onchange = async (e) => {
-      Prefs.set("tajweed", e.target.checked);
-      if (e.target.checked) {
-        if (wbwCb.checked) { wbwCb.checked = false; Prefs.set("wbw", false); }
-        disableWbW(out, ar.ayahs);
-        enableTajweed(sNum);
-      } else disableWbW(out, ar.ayahs);
+      if (e.target.checked) enableWbW(sNum, ar.ayahs);
+      else { disableWbW(out, ar.ayahs); enableTajweed(sNum); }
     };
 
-    $("#q-tafsir-links").checked = Prefs.getBool("tafsirLinks", true); $("#q-tafsir-links").onchange = (e) => { Prefs.set("tafsirLinks", e.target.checked); $$(".tafsir-link, .asbab-link", out).forEach((el) => el.style.display = e.target.checked ? "" : "none"); };
-    if (!Prefs.getBool("tafsirLinks", true)) $$(".tafsir-link, .asbab-link", out).forEach((el) => el.style.display = "none");
     const memorization = $("#q-memorization"), recitationButton = $("#q-recitation");
     memorization.onchange = () => {
-      if (memorization.checked && (wbwCb.checked || tjCb.checked)) {
-        wbwCb.checked = false; tjCb.checked = false; Prefs.set("wbw", false); Prefs.set("tajweed", false); disableWbW(out, ar.ayahs);
+      if (memorization.checked && wbwCb.checked) {
+        wbwCb.checked = false; Prefs.set("wbw", false); disableWbW(out, ar.ayahs);
       }
       syncMemorizationMask();
       syncQuranModeControls();
+      if (!memorization.checked && !recitation.active) enableTajweed(sNum);
     };
     syncQuranModeControls();
     recitationButton.onclick = () => recitation.active ? stopRecitation() : startRecitation();
@@ -866,19 +907,17 @@ const APP = (() => {
     $$(".ayah-ar", out).forEach((el) => { const ar = el.dataset.ar, no = el.querySelector(".ayah-no"), num = no ? no.outerHTML : ""; el.innerHTML = esc(ar) + " " + num; });
   }
   async function enableTajweed(sNum) {
-    const out = $("#q-out"), cb = $("#q-tajweed");
-    if (!out || !cb) return;
+    const out = $("#q-out");
+    if (!out || $("#q-memorization")?.checked) return;
     let map;
     try { map = await getTajweed(sNum); }
     catch {
       if (out.isConnected) {
-        cb.checked = false; Prefs.set("tajweed", false);
         out.insertAdjacentHTML("afterbegin", notice("Tajweed colors could not be loaded right now."));
       }
       return;
     }
-    // ignore if the person left this surah, switched the option off, or turned on word-by-word meanwhile
-    if (!out.isConnected || !cb.checked || $("#q-wbw")?.checked) return;
+    if (!out.isConnected || $("#q-wbw")?.checked || $("#q-memorization")?.checked || recitation.active) return;
     $$(".ayah-ar", out).forEach((el) => {
       const art = el.closest(".ayah");
       const raw = art ? map[+art.dataset.ayah] : "";
@@ -906,34 +945,14 @@ const APP = (() => {
   function tafsirOptions() { return TAFSIR_SOURCES.map((t) => ({ value: t.id, label: `${t.name} — ${t.author}`, group: t.group })); }
   function findTafsir(id) { return TAFSIR_SOURCES.find((t) => t.id === id); }
   function verseBoxHTML(meta, s, a, ayah) { return `<div class="verse-box"><p class="ref">${esc(meta.englishName)} · ${s}:${a}</p><p class="ayah-ar">${esc(ayah.ar)} <span class="ayah-no">﴿${toArabicNum(a)}﴾</span></p><p class="ayah-en">${esc(ayah.en)}</p></div>`; }
-  function tafsirCardHTML(meta, text) { return `<div class="tafsir-card"><h3>${esc(meta?.name || "Tafsir")}</h3><p class="by">${esc(meta?.author || "")}</p><div class="tafsir-body rtl">${text ? sanitize(text) : "<p>No commentary text returned for this verse.</p>"}</div></div>`; }
-  async function translateArabic(html) {
-    const text = (new DOMParser().parseFromString(html, "text/html").body.textContent || "").replace(/\u00a0/g, " ").trim();
-    if (!text) throw new Error("No Arabic text to translate.");
-    const paras = text.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean), out = [];
-    for (const p of paras) {
-      const chunks = p.match(/[^.!?؟۔\n]+[.!?؟۔\n]*/g) || [p], translatedChunks = [];
-      for (const c of chunks) {
-        const c_ = c.trim(); if (!c_) continue;
-        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=ar&tl=en&dt=t&q=${encodeURIComponent(c_)}`;
-        const res = await fetch(url); if (!res.ok) throw new Error("Translation failed.");
-        const data = await res.json().catch(() => null); if (!Array.isArray(data) || !Array.isArray(data[0])) throw new Error("Bad response.");
-        translatedChunks.push(data[0].map((seg) => (Array.isArray(seg) && typeof seg[0] === "string") ? seg[0] : "").join(""));
-        await sleep(120);
-      }
-      out.push(translatedChunks.join(" "));
-    }
-    return out.join("\n\n");
-  }
-  async function applyTranslation(bodyEl, arabicHtml, isCurrent) {
-    bodyEl.classList.remove("rtl"); bodyEl.innerHTML = `<div class="loader"><span class="spinner"></span><p>Translating tafsir… May take longer</p></div>`;
-    try {
-      const translated = await translateArabic(arabicHtml); if (isCurrent && !isCurrent()) return;
-      if (bodyEl.isConnected) bodyEl.innerHTML = translated.split(/\n{2,}/).map((p) => `<p>${esc(p)}</p>`).join("");
-    } catch (e) {
-      if (isCurrent && !isCurrent()) return; bodyEl.classList.add("rtl");
-      bodyEl.innerHTML = `<div class="notice error" style="margin-bottom:1rem"><strong>Translation failed.</strong> ${esc(e.message)}</div>${sanitize(arabicHtml)}`;
-    }
+  function tafsirCardHTML(meta, text) {
+    return `<div class="tafsir-card">
+      <header class="tafsir-card-head"><div><h3>${esc(meta?.name || "Tafsir")}</h3><p class="by">${esc(meta?.author || "")}</p></div>
+        <button type="button" class="icon-btn local-translate-trigger" title="Translate this commentary" aria-label="Translate this commentary" aria-controls="local-language-popover" aria-expanded="false" aria-pressed="false">${TR_ICON}</button>
+      </header>
+      <div class="tafsir-body rtl">${text ? sanitize(text) : "<p>No commentary text returned for this verse.</p>"}</div>
+      <div class="tafsir-translation lib-trans" hidden></div>
+    </div>`;
   }
   async function tafsir(sNum, aNum) {
     const token = navToken; mount("tpl-tafsir"); const out = $("#t-out"), aIn = $("#t-ayah"); out.innerHTML = loader("Loading…");
@@ -945,8 +964,14 @@ const APP = (() => {
     syncMax(); aIn.value = parseInt(aNum) || 1; if (+aIn.value > +aIn.max) aIn.value = 1;
     let compareMode = false; const cmpBtn = $("#t-compare"), cmpRow = $("#t-compare-row");
     cmpBtn.onclick = () => { compareMode = !compareMode; cmpRow.hidden = !compareMode; cmpBtn.classList.toggle("is-active", compareMode); cmpBtn.textContent = compareMode ? "Single" : "Compare"; if (compareMode && tSel2.value === tSel.value) { const other = opts.find((o) => o.value !== tSel.value); if (other) tSel2.value = other.value; } if (sNum && aNum) load(); };
-    let translate = Prefs.getBool("translateTafsir", false); const enTog = $("#t-translate-en"), enRow = $("#t-translate-row");
-    enTog.checked = translate; enRow.classList.toggle("is-live", translate); enTog.onchange = () => { translate = enTog.checked; Prefs.set("translateTafsir", translate); enRow.classList.toggle("is-live", translate); if (sNum && aNum) load(); };
+    out.onclick = (event) => {
+      const button = event.target.closest(".local-translate-trigger");
+      if (!button) return;
+      const card = button.closest(".tafsir-card");
+      const body = card && $(".tafsir-body", card);
+      const target = card && $(".tafsir-translation", card);
+      if (body && target) toggleLocalTranslation(localTranslationSource(body.innerHTML), body, target, button, event);
+    };
     let reqId = 0;
     async function load() {
       const s = +sSel.value, a = +aIn.value, max = surahs[s - 1].numberOfAyahs;
@@ -965,10 +990,6 @@ const APP = (() => {
           out.innerHTML = `${verseBoxHTML(surahs[s-1], s, a, ayah)}${tafsirCardHTML(meta, tafsirText)}<div class="pager"><button class="btn btn-ghost" id="t-prev" ${a === 1 ? "disabled" : ""}>← Previous</button><button class="btn btn-ghost" id="t-next" ${a === max ? "disabled" : ""}>Next →</button></div>`;
         }
         $("#t-prev").onclick = () => { aIn.value = a - 1; load(); }; $("#t-next").onclick = () => { aIn.value = a + 1; load(); };
-        if (translate) {
-          if (compareMode) { const bodies = $$(".tafsir-body", out); if (bodies[0]) applyTranslation(bodies[0], tafsirText, isCur); if (bodies[1] && tafsirText2) applyTranslation(bodies[1], tafsirText2, isCur); }
-          else applyTranslation($(".tafsir-body", out), tafsirText, isCur);
-        }
         const related = await getRelatedVerses(s, a);
         if (related.length && isCur()) $("#t-related").innerHTML = `<h4 class="related-head">Related verses</h4><div class="related-grid">${related.map((v) => `<a class="related-item" href="#/tafsir/${v.surah}/${v.ayah}"><div class="related-ref">${esc(surahs[s-1].englishName)} · ${v.surah}:${v.ayah}</div><div class="related-ar">${esc(v.ar)}</div></a>`).join("")}</div>`;
       } catch (e) { if (isCur()) out.innerHTML = errorBox(e); }
@@ -1065,8 +1086,7 @@ const APP = (() => {
      which calls the real turath-sdk. Nothing here is mocked.
      ============================================================ */
 
-  // If you open index.html by double-clicking it (file://), the server is still
-  // reached at http://localhost:3000. When served by the server, paths are relative.
+  // file:// uses localhost for desktop testing; phones must open the server's LAN URL.
   const TURATH_BASE = location.protocol === "file:" ? "http://localhost:3000" : "";
 
   async function turathGet(path, params = {}) {
@@ -1075,11 +1095,19 @@ const APP = (() => {
       .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
       .join("&");
     let res;
-    try { res = await fetch(`${TURATH_BASE}${path}${qs ? "?" + qs : ""}`, fetchTimeout(20000)); }
-    catch { throw new Error("Something went wrong."); }
+    try { res = await fetch(`${TURATH_BASE}${path}${qs ? "?" + qs : ""}`, fetchTimeout(60000)); }
+    catch (error) {
+      if (location.protocol === "file:" && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+        throw new Error("The library server is not available at this phone's localhost. Start the server on your computer and open the LAN address printed by npm start, on the same Wi-Fi.");
+      }
+      if (error.name === "TimeoutError" || error.name === "AbortError") {
+        throw new Error("The library request timed out. Check the server and internet connection, then try again.");
+      }
+      throw new Error("Could not connect to the library server. Keep the server running; on a phone, use the computer's LAN address on the same Wi-Fi.");
+    }
     let body = null;
     try { body = await res.json(); } catch {}
-    if (!res.ok || body === null) throw new Error("Something went wrong.");
+    if (!res.ok || body === null) throw new Error(body?.error || `Library request failed (${res.status}).`);
     return body;
   }
   const getTurathPage = (book, page) => memo(`tpage-${book}:${page}`, () => turathGet("/api/turath/page", { book, page }));
@@ -1181,9 +1209,7 @@ const APP = (() => {
       .map((s) => String(s).replace(/<[^>]*>/g, "").trim()).filter(Boolean).join(" › ");
   }
   const locLabel = (m) => [m.vol ? `Vol. ${m.vol}` : "", m.page != null ? `Page ${m.page}` : ""].filter(Boolean).join(" · ");
-  const TR_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h8M8 5c0 5-1.5 9-4 11"/><path d="M5 10c1.5 3 4 5.5 7 7"/><path d="M13 20l4-10 4 10"/><path d="M14.5 16h5"/></svg>`;
-  const translatedHtml = (t) => `<p class="lib-trans-label">English · machine translation (Google Translate)</p>` + String(t).split(/\n{2,}/).map((p) => `<p>${esc(p)}</p>`).join("");
-
+  const TR_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h8M8 5c0 5-1.5 9-4 11"/><path d="M5 10c1.5 3 4 5.5 7 7"/><path d="M13 20l4-10 4 10"/><path d="M14.5 16h5"/></svg>`;
   /* --- Library search page --- */
   // Remembered between visits to the reader, so "Back to search" restores your results
   const libState = { q: "", page: 1, count: 0, pageSize: 0, sort: "", author: null, book: null, authorQuery: "", bookQuery: "" };
@@ -1302,15 +1328,15 @@ const APP = (() => {
         <div class="lib-meta"><div class="lib-titles">${readHref ? `<a class="lib-book" href="${readHref}">${esc(bookName)}</a>` : `<span class="lib-book">${esc(bookName)}</span>`}${m.author_name ? `<span class="lib-author">${esc(m.author_name)}</span>` : ""}</div>${loc ? `<span class="pill">${esc(loc)}</span>` : ""}</div>
         ${heads ? `<p class="lib-heads">${esc(heads)}</p>` : ""}
         <div class="lib-snip" dir="auto">${passageHtml(snipOf(r), q, { marks: true })}</div>
+        <div class="lib-trans" hidden></div>
         <div class="lib-actions">
           ${readHref ? `<a class="btn btn-primary btn-sm" href="${readHref}">Read page</a>` : ""}
-          <button type="button" class="icon-btn" data-act="translate" title="Translate to English" aria-label="Translate to English">${TR_ICON}</button>
+          <button type="button" class="icon-btn local-translate-trigger" data-act="translate" title="Translate with local AI" aria-label="Translate with local AI" aria-controls="local-language-popover" aria-expanded="false" aria-pressed="false">${TR_ICON}</button>
           ${hasFull ? `<button type="button" class="lib-chip-btn" data-act="full">Full passage</button>` : ""}
           ${authorId != null ? `<button type="button" class="lib-chip-btn" data-act="author">Only this author</button>` : ""}
           ${bookId != null ? `<button type="button" class="lib-chip-btn" data-act="book">Only this book</button>` : ""}
           ${bookId != null && pageRef != null ? `<button type="button" class="icon-btn ${bm ? "bookmarked" : ""}" data-act="bm" title="Bookmark" aria-label="Bookmark">${bm ? "★" : "☆"}</button>` : ""}
         </div>
-        <div class="lib-trans" hidden></div>
       </article>`;
     }
 
@@ -1400,9 +1426,20 @@ const APP = (() => {
       }
       else if (act === "full") {
         const full = card.classList.toggle("is-full");
-        $(".lib-snip", card).innerHTML = passageHtml(full ? r.text : snipOf(r), libState.q, { marks: true });
+        const original = $(".lib-snip", card), tr = $(".lib-trans", card);
+        cancelActiveTranslation(tr);
+        original.hidden = false;
+        original.innerHTML = passageHtml(full ? r.text : snipOf(r), libState.q, { marks: true });
         btn.textContent = full ? "Show snippet" : "Full passage";
-        const tr = $(".lib-trans", card); tr.hidden = true; tr.innerHTML = ""; // old translation was of the other text
+        tr.hidden = true; tr.innerHTML = "";
+        delete tr.dataset.ready;
+        delete tr.dataset.language;
+        const translateButton = $(".local-translate-trigger", card);
+        resetTranslationTrigger({
+          trigger: translateButton,
+          originalTitle: translateButton.dataset.translationTitle || translateButton.title,
+          originalLabel: translateButton.dataset.translationLabel || translateButton.getAttribute("aria-label"),
+        });
       }
       else if (act === "bm") {
         const id = `turath-${bookId}-${pageRef}`;
@@ -1411,19 +1448,9 @@ const APP = (() => {
       }
       else if (act === "translate") {
         const tr = $(".lib-trans", card);
-        if (!tr.hidden && tr.dataset.ready === "1") { tr.hidden = true; return; }
+        const original = $(".lib-snip", card);
         const src = card.classList.contains("is-full") ? r.text : snipOf(r);
-        tr.hidden = false; tr.dataset.ready = "0";
-        tr.innerHTML = `<div class="lib-loading"><span class="spinner sm"></span> Translating…</div>`;
-        btn.disabled = true;
-        try {
-          const t = await translateArabic(cleanTurathHtml(src).replace(/<br\s*\/?>/gi, "\n"));
-          if (token !== navToken) return;
-          tr.innerHTML = translatedHtml(t); tr.dataset.ready = "1";
-        } catch (err) {
-          if (token !== navToken) return;
-          tr.innerHTML = `<div class="notice error"><strong>Translation failed.</strong> ${esc(err.message)}</div>`;
-        } finally { btn.disabled = false; }
+        toggleLocalTranslation(localTranslationSource(cleanTurathHtml(src)), original, tr, btn, e);
       }
     };
 
@@ -1500,11 +1527,11 @@ const APP = (() => {
         prev.disabled = page <= 1;
         next.disabled = !hasNext;
         pageInfo.textContent = `Page ${page}${hasNext ? ` of ${Math.ceil(total / PAGE_SIZE).toLocaleString()}` : ""}`;
-      } catch {
+      } catch (error) {
         if (token !== navToken || mine !== requestId) return;
         status.textContent = "";
         pager.hidden = true;
-        out.innerHTML = errorBox(new Error("Something went wrong."));
+        out.innerHTML = errorBox(error);
       }
     }
 
@@ -1575,19 +1602,13 @@ const APP = (() => {
 
     // Translate whole page
     const trBtn = $("#r-translate"), trBox = $("#r-trans");
-    trBtn.onclick = async () => {
-      if (!trBox.hidden) { trBox.hidden = true; trBtn.textContent = "Translate"; return; }
-      trBox.hidden = false; trBtn.disabled = true; trBtn.textContent = "Hide translation";
-      trBox.innerHTML = `<div class="lib-loading"><span class="spinner sm"></span> Translating this page… it can take a moment</div>`;
-      try {
-        const t = await translateArabic(cleanTurathHtml(pageData.text).replace(/<br\s*\/?>/gi, "\n"));
-        if (token !== navToken) return;
-        trBox.innerHTML = translatedHtml(t);
-      } catch (e) {
-        if (token !== navToken) return;
-        trBox.innerHTML = `<div class="notice error"><strong>Translation failed.</strong> ${esc(e.message)}</div>`;
-      } finally { if (token === navToken) trBtn.disabled = false; }
-    };
+    trBtn.onclick = (event) => toggleLocalTranslation(
+      localTranslationSource(cleanTurathHtml(pageData.text)),
+      $("#r-out"),
+      trBox,
+      trBtn,
+      event,
+    );
 
     // Contents (shown only if the book info has a recognisable list of headings)
     const toc = tocFrom(info);
@@ -1598,7 +1619,7 @@ const APP = (() => {
 
     // Author details (loaded after the page, never blocks reading)
     const authorId = bm.author_id ?? m.author_id;
-    if (authorId != null) {
+    if (authorId != null && !$("#r-author").textContent.trim()) {
       getTurathAuthor(authorId).then((res) => {
         if (token !== navToken) return;
         const a = (res && res.author) || {};
@@ -1609,7 +1630,9 @@ const APP = (() => {
         if (name && !$("#r-author").textContent) $("#r-author").textContent = name;
         $("#r-author-body").innerHTML = `${name ? `<p><b>${esc(name)}</b>${death !== "" && death != null ? ` · Death: ${esc(death)}` : ""}</p>` : ""}${bio ? `<div class="rtl-text" dir="rtl">${passageHtml(bio, "")}</div>` : ""}`;
         $("#r-author-box").hidden = false;
-      }).catch(() => {});
+      }).catch((error) => {
+        if (token === navToken) console.warn("Turath author details are unavailable:", error);
+      });
     }
   }
 
@@ -1664,47 +1687,345 @@ const APP = (() => {
 
   /* Modals & Translator */
   function openModal(html) { const overlay = $("#modal"); $("#modal-body").innerHTML = html; overlay.hidden = false; document.body.classList.add("modal-open"); setTimeout(() => $("#modal-close")?.focus(), 50); }
-  function closeModal() { modalToken++; const overlay = $("#modal"); if (!overlay) return; overlay.hidden = true; if ($("#settings-modal")?.hidden !== false && $("#translator-modal")?.hidden !== false) document.body.classList.remove("modal-open"); $("#modal-body").innerHTML = ""; }
+  function releaseModalScroll() {
+    if ($("#modal")?.hidden !== false && $("#settings-modal")?.hidden !== false) {
+      document.body.classList.remove("modal-open");
+    }
+  }
+  function closeModal() { modalToken++; const overlay = $("#modal"); if (!overlay) return; overlay.hidden = true; releaseModalScroll(); $("#modal-body").innerHTML = ""; }
   function openSettings() { const overlay = $("#settings-modal"); overlay.hidden = false; document.body.classList.add("modal-open"); $$(".theme-swatch", overlay).forEach((b) => b.classList.toggle("active", b.dataset.theme === document.documentElement.getAttribute("data-theme"))); }
-  function closeSettings() { const overlay = $("#settings-modal"); if (!overlay) return; overlay.hidden = true; if ($("#modal")?.hidden !== false && $("#translator-modal")?.hidden !== false) document.body.classList.remove("modal-open"); }
-  $("#modal-close")?.addEventListener("click", closeModal); $("#settings-btn")?.addEventListener("click", openSettings); $("#settings-close")?.addEventListener("click", closeSettings); document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeSettings(); closeTranslator(); } });
+  function closeSettings() { const overlay = $("#settings-modal"); if (!overlay) return; overlay.hidden = true; releaseModalScroll(); }
+  $("#modal-close")?.addEventListener("click", closeModal); $("#settings-btn")?.addEventListener("click", openSettings); $("#settings-close")?.addEventListener("click", closeSettings); document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeSettings(); closeLanguagePopover(); } });
   $$(".theme-swatch", $("#theme-picker")).forEach((b) => b.onclick = () => { applyTheme(b.dataset.theme); $$(".theme-swatch").forEach((x) => x.classList.toggle("active", x.dataset.theme === b.dataset.theme)); });
   $("#font-scale").value = Prefs.get("fontScale", "1"); $("#font-scale-label").textContent = Math.round(+Prefs.get("fontScale", "1") * 100) + "%"; $("#font-scale").oninput = (e) => { const v = e.target.value; applyFontScale(v); $("#font-scale-label").textContent = Math.round(+v * 100) + "%"; };
 
-  const LANGS = [{code:"af",name:"Afrikaans"},{code:"sq",name:"Albanian"},{code:"am",name:"Amharic"},{code:"ar",name:"Arabic"},{code:"hy",name:"Armenian"},{code:"az",name:"Azerbaijani"},{code:"eu",name:"Basque"},{code:"be",name:"Belarusian"},{code:"bn",name:"Bengali"},{code:"bs",name:"Bosnian"},{code:"bg",name:"Bulgarian"},{code:"ca",name:"Catalan"},{code:"ceb",name:"Cebuano"},{code:"zh-CN",name:"Chinese (Simplified)"},{code:"zh-TW",name:"Chinese (Traditional)"},{code:"hr",name:"Croatian"},{code:"cs",name:"Czech"},{code:"da",name:"Danish"},{code:"nl",name:"Dutch"},{code:"en",name:"English"},{code:"eo",name:"Esperanto"},{code:"et",name:"Estonian"},{code:"tl",name:"Filipino"},{code:"fi",name:"Finnish"},{code:"fr",name:"French"},{code:"gl",name:"Galician"},{code:"ka",name:"Georgian"},{code:"de",name:"German"},{code:"el",name:"Greek"},{code:"gu",name:"Gujarati"},{code:"ht",name:"Haitian Creole"},{code:"ha",name:"Hausa"},{code:"he",name:"Hebrew"},{code:"hi",name:"Hindi"},{code:"hu",name:"Hungarian"},{code:"is",name:"Icelandic"},{code:"ig",name:"Igbo"},{code:"id",name:"Indonesian"},{code:"ga",name:"Irish"},{code:"it",name:"Italian"},{code:"ja",name:"Japanese"},{code:"jw",name:"Javanese"},{code:"kn",name:"Kannada"},{code:"kk",name:"Kazakh"},{code:"km",name:"Khmer"},{code:"ko",name:"Korean"},{code:"ku",name:"Kurdish"},{code:"ky",name:"Kyrgyz"},{code:"lo",name:"Lao"},{code:"la",name:"Latin"},{code:"lv",name:"Latvian"},{code:"lt",name:"Lithuanian"},{code:"mk",name:"Macedonian"},{code:"mg",name:"Malagasy"},{code:"ms",name:"Malay"},{code:"ml",name:"Malayalam"},{code:"mt",name:"Maltese"},{code:"mi",name:"Maori"},{code:"mr",name:"Marathi"},{code:"mn",name:"Mongolian"},{code:"my",name:"Myanmar"},{code:"ne",name:"Nepali"},{code:"no",name:"Norwegian"},{code:"ps",name:"Pashto"},{code:"fa",name:"Persian"},{code:"pl",name:"Polish"},{code:"pt",name:"Portuguese"},{code:"pa",name:"Punjabi"},{code:"ro",name:"Romanian"},{code:"ru",name:"Russian"},{code:"sm",name:"Samoan"},{code:"sr",name:"Serbian"},{code:"st",name:"Sesotho"},{code:"sn",name:"Shona"},{code:"sd",name:"Sindhi"},{code:"si",name:"Sinhala"},{code:"sk",name:"Slovak"},{code:"sl",name:"Slovenian"},{code:"so",name:"Somali"},{code:"es",name:"Spanish"},{code:"su",name:"Sundanese"},{code:"sw",name:"Swahili"},{code:"sv",name:"Swedish"},{code:"tg",name:"Tajik"},{code:"ta",name:"Tamil"},{code:"tt",name:"Tatar"},{code:"te",name:"Telugu"},{code:"th",name:"Thai"},{code:"tr",name:"Turkish"},{code:"tk",name:"Turkmen"},{code:"uk",name:"Ukrainian"},{code:"ur",name:"Urdu"},{code:"ug",name:"Uyghur"},{code:"uz",name:"Uzbek"},{code:"vi",name:"Vietnamese"},{code:"cy",name:"Welsh"},{code:"yi",name:"Yiddish"},{code:"yo",name:"Yoruba"},{code:"zu",name:"Zulu"}];
-  const RTL_LANGS = new Set(["ar","he","fa","ur","ps","sd","ug","yi","ckb"]);
-  let trFrom = "ar", trTo = "en", trFromSel = null, trToSel = null, trBusy = false, trAbort = null, trInit = false;
-  function isRTL(code) { return RTL_LANGS.has(code); }
-  function applyTrDir() { const src = $("#tr-src"), tgt = $("#tr-tgt"); if (!src || !tgt) return; src.setAttribute("dir", isRTL(trFrom) ? "rtl" : "ltr"); tgt.setAttribute("dir", isRTL(trTo) ? "rtl" : "ltr"); src.classList.toggle("arabic", trFrom === "ar"); tgt.classList.toggle("arabic", trTo === "ar"); }
-  function setTrStatus(msg, kind = "") { const el = $("#tr-status"); if (!el) return; el.className = "tr-status" + (kind ? " " + kind : ""); el.replaceChildren(); if (kind === "loading") { const sp = document.createElement("span"); sp.className = "spinner"; el.appendChild(sp); } el.appendChild(document.createTextNode(msg)); }
-  async function doTranslate() {
-    const text = $("#tr-src").value.trim(); if (!text) { setTrStatus(""); $("#tr-tgt").value = ""; return; } if (trBusy) return;
-    trBusy = true; $("#tr-go").disabled = true; setTrStatus("Translating…", "loading"); $("#tr-tgt").value = ""; if (trAbort) trAbort.abort(); trAbort = new AbortController();
-    try {
-      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(trFrom)}&tl=${encodeURIComponent(trTo)}&dt=t&q=${encodeURIComponent(text)}`;
-      const res = await fetch(url, { signal: trAbort.signal }); if (!res.ok) throw new Error("Service error " + res.status);
-      const data = await res.json().catch(() => null); if (!Array.isArray(data) || !Array.isArray(data[0])) throw new Error("Bad response");
-      const out = data[0].map((s) => Array.isArray(s) && typeof s[0] === "string" ? s[0] : "").join("");
-      if (!out) throw new Error("Empty translation"); $("#tr-tgt").value = out; setTrStatus("Done.", "ok"); setTimeout(() => { if ($("#tr-status")?.textContent === "Done.") setTrStatus(""); }, 1800);
-    } catch (e) { if (e.name === "AbortError") return; setTrStatus(e.message || "Translation failed.", "error"); } finally { trBusy = false; $("#tr-go").disabled = false; }
+  const LANGUAGE_CODES = (`aa ab ae af ak am an ar as av ay az ba be bg bh bi bm bn bo br bs ca ce ch co cr cs cu cv cy da de dv dz ee el en eo es et eu fa ff fi fj fo fr fy ga gd gl gn gu gv ha he hi ho hr ht hu hy hz ia id ie ig ii ik io is it iu ja jv ka kg ki kj kk kl km kn ko kr ks ku kv kw ky la lb lg li ln lo lt lu lv mg mh mi mk ml mn mr ms mt my na nb nd ne ng nl nn no nr nv ny oc oj om or os pa pi pl ps pt qu rm rn ro ru rw sa sc sd se sg si sk sl sm sn so sq sr ss st su sv sw ta te tg th ti tk tl tn to tr ts tt tw ty ug uk ur uz ve vi vo wa wo xh yi yo za zh zu ckb cmn yue nan fil haw grc cop syr sah crh nqo shi ber gsw nds lzh mni bho mai doi sat kok mag awa hne tcy kab arn aym quc pap sco zh-Hans zh-Hant sr-Latn sr-Cyrl uz-Latn uz-Cyrl pa-Arab pa-Guru sd-Arab sd-Deva`).split(/\s+/);
+  const LANGUAGE_LABEL_OVERRIDES = {
+    aa: "Afar", ab: "Abkhazian", ae: "Avestan", ak: "Akan", av: "Avaric", ba: "Bashkir",
+    bh: "Bihari", bi: "Bislama", bo: "Tibetan", ce: "Chechen", ch: "Chamorro",
+    cop: "Coptic", cr: "Cree", crh: "Crimean Tatar", cu: "Church Slavic", cv: "Chuvash",
+    dz: "Dzongkha", ff: "Fula", fj: "Fijian", grc: "Ancient Greek", gsw: "Swiss German",
+    gv: "Manx", hne: "Chhattisgarhi", ho: "Hiri Motu", hz: "Herero", ie: "Interlingue",
+    ii: "Sichuan Yi", ik: "Inupiaq", io: "Ido", iu: "Inuktitut", kab: "Kabyle",
+    kg: "Kongo", ki: "Kikuyu", kj: "Kuanyama", kl: "Kalaallisut", kr: "Kanuri",
+    ks: "Kashmiri", kv: "Komi", kw: "Cornish", li: "Limburgish", lu: "Luba-Katanga",
+    lzh: "Literary Chinese", mag: "Magahi", mh: "Marshallese", na: "Nauru",
+    nan: "Minnan Chinese", nd: "North Ndebele", nds: "Low German", ng: "Ndonga",
+    nqo: "N'Ko", nr: "South Ndebele", nv: "Navajo", oj: "Ojibwa", os: "Ossetian",
+    pap: "Papiamento", pi: "Pali", quc: "K'iche'", rn: "Rundi", sah: "Sakha",
+    sat: "Santali", sc: "Sardinian", sco: "Scots", se: "Northern Sami", sg: "Sango",
+    shi: "Shilha", ss: "Swati", syr: "Syriac", tcy: "Tulu", ty: "Tahitian",
+    ve: "Venda", vo: "Volapuk", za: "Zhuang", tw: "Twi", ay: "Aymara",
+    aym: "Aymara (extended)", cmn: "Mandarin Chinese", fil: "Filipino", tl: "Tagalog",
+    bho: "Bhojpuri",
+  };
+  const LANGUAGE_NAMES = typeof Intl.DisplayNames === "function"
+    ? new Intl.DisplayNames(["en"], { type: "language" })
+    : null;
+  const LANGUAGES = LANGUAGE_CODES.map((code) => {
+    let name = code;
+    try { name = LANGUAGE_LABEL_OVERRIDES[code] || LANGUAGE_NAMES?.of(code) || code; } catch {}
+    return { code, name };
+  }).sort((a, b) => a.name.localeCompare(b.name));
+  const RTL_LANGS = new Set(["ar", "he", "fa", "ur", "ps", "sd", "ug", "yi", "ckb"]);
+  const languageName = (code) => LANGUAGES.find((language) => language.code === code)?.name || code;
+  const isRTL = (code) => RTL_LANGS.has(String(code).split("-")[0]);
+
+  const languagePopover = $("#local-language-popover");
+  const languageSelectMount = $("#local-language-select");
+  let translationContext = null, translationRun = 0, activeTranslation = null;
+
+  function resetTranslationTrigger(context) {
+    context.trigger.title = context.originalTitle;
+    context.trigger.setAttribute("aria-label", context.originalLabel);
+    context.trigger.setAttribute("aria-pressed", "false");
+    context.trigger.setAttribute("aria-expanded", "false");
   }
-  function updateTrCounts() { const s = $("#tr-src"), t = $("#tr-tgt"); if (s) $("#tr-src-count").textContent = s.value.length; if (t) $("#tr-tgt-count").textContent = t.value.length; }
-  function openTranslator() {
-    const overlay = $("#translator-modal"); if (!overlay || !overlay.hidden) return; overlay.hidden = false; document.body.classList.add("modal-open");
-    if (!trInit) {
-      trInit = true;
-      trFromSel = makeSelect($("#tr-from-mount"), { options: LANGS.map((l) => ({ value: l.code, label: l.name })), value: trFrom, placeholder: "From", onChange: (v) => { trFrom = v; applyTrDir(); if ($("#tr-src").value.trim()) doTranslate(); } });
-      trToSel = makeSelect($("#tr-to-mount"), { options: LANGS.map((l) => ({ value: l.code, label: l.name })), value: trTo, placeholder: "To", onChange: (v) => { trTo = v; applyTrDir(); if ($("#tr-src").value.trim()) doTranslate(); } });
-      applyTrDir();
-      $("#tr-swap").onclick = () => { const tmp = trFrom; trFrom = trTo; trTo = tmp; trFromSel.value = trFrom; trToSel.value = trTo; const a = $("#tr-src").value; $("#tr-src").value = $("#tr-tgt").value; $("#tr-tgt").value = a; applyTrDir(); updateTrCounts(); if ($("#tr-src").value.trim()) doTranslate(); };
-      $("#tr-go").onclick = doTranslate; $("#tr-src").addEventListener("input", updateTrCounts);
-      $("#tr-copy").onclick = async () => { const t = $("#tr-tgt").value; if (!t.trim()) return; try { await navigator.clipboard.writeText(t); setTrStatus("Copied.", "ok"); setTimeout(() => setTrStatus(""), 1500); } catch { setTrStatus("Copy failed.", "error"); } };
-      $("#tr-src").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doTranslate(); } }); $("#tr-close").onclick = closeTranslator;
+  function closeLanguagePopover() {
+    if (!languagePopover || languagePopover.hidden) return;
+    const panel = $(".cselect-panel", languageSelectMount);
+    if (panel) panel.hidden = true;
+    $(".cselect", languageSelectMount)?.classList.remove("is-open");
+    languagePopover.hidden = true;
+    if (translationContext?.trigger?.isConnected) translationContext.trigger.setAttribute("aria-expanded", "false");
+    translationContext = null;
+  }
+  function cancelActiveTranslation(target) {
+    if (!activeTranslation || (target && activeTranslation.context.target !== target)) return;
+    const active = activeTranslation;
+    activeTranslation = null;
+    active.controller.abort();
+    translationRun++;
+    const { context } = active;
+    if (context.target.isConnected && !context.target.dataset.ready) {
+      context.target.hidden = true;
+      context.target.setAttribute("aria-busy", "false");
+      context.original.hidden = false;
+      resetTranslationTrigger(context);
     }
-    setTimeout(() => $("#tr-src")?.focus(), 60);
   }
-  function closeTranslator() { if (trAbort) { trAbort.abort(); trAbort = null; } const overlay = $("#translator-modal"); if (!overlay) return; overlay.hidden = true; if ($("#modal")?.hidden !== false && $("#settings-modal")?.hidden !== false) document.body.classList.remove("modal-open"); }
-  $("#translator-fab")?.addEventListener("click", openTranslator);
+  function renderLocalTranslation(text, code) {
+    const direction = isRTL(code) ? "rtl" : "ltr";
+    return `<p class="lib-trans-label">Local AI · ${esc(languageName(code))}</p>${String(text).split(/\n{2,}/).map((paragraph) => `<p dir="${direction}" lang="${esc(code)}">${esc(paragraph)}</p>`).join("")}`;
+  }
+  function showOriginalTranslation(context) {
+    cancelActiveTranslation();
+    context.target.hidden = true;
+    context.target.setAttribute("aria-busy", "false");
+    context.original.hidden = false;
+    resetTranslationTrigger(context);
+  }
+  function openLanguagePopover(context) {
+    translationContext = context;
+    languageSelect.value = "";
+    languagePopover.hidden = false;
+    context.trigger.setAttribute("aria-expanded", "true");
+    const rect = context.trigger.getBoundingClientRect();
+    const width = Math.min(280, Math.max(0, window.innerWidth - 16));
+    languagePopover.style.width = `${width}px`;
+    const popoverRect = languagePopover.getBoundingClientRect();
+    const controlRect = languageSelectMount.getBoundingClientRect();
+    const controlTop = controlRect.top - popoverRect.top;
+    const spaceAbove = rect.top - popoverRect.height - 8 + controlTop - 14;
+    const spaceBelow = window.innerHeight - 8 - (rect.bottom + 8 + controlTop + controlRect.height + 6);
+    const listHeightAbove = Math.max(0, spaceAbove - 54);
+    const listHeightBelow = Math.max(0, spaceBelow - 54);
+    const opensUp = listHeightAbove > listHeightBelow;
+    const listHeight = Math.max(40, Math.min(230, opensUp ? listHeightAbove : listHeightBelow));
+    $(".cselect-list", languageSelectMount).style.maxHeight = `${listHeight}px`;
+    languagePopover.classList.toggle("opens-up", opensUp);
+    const maxLeft = Math.max(8, window.innerWidth - width - 8);
+    const left = Math.min(Math.max(8, rect.left), maxLeft);
+    const top = opensUp
+      ? Math.max(8, rect.top - popoverRect.height - 8)
+      : Math.min(rect.bottom + 8, Math.max(8, window.innerHeight - popoverRect.height - 8));
+    languagePopover.style.left = `${left}px`;
+    languagePopover.style.top = `${top}px`;
+    $(".cselect-btn", languageSelectMount)?.focus({ preventScroll: true });
+  }
+  function setTranslationLoading(context, run, message) {
+    if (run !== translationRun || !context.target.isConnected) return;
+    context.target.innerHTML = `<div class="lib-loading"><span class="spinner sm" aria-hidden="true"></span><span>${esc(message)}</span></div>`;
+  }
+  async function runLocalTranslation(context, code) {
+    cancelActiveTranslation();
+    const run = ++translationRun;
+    const controller = new AbortController();
+    activeTranslation = { context, controller, run };
+    context.target.hidden = false;
+    context.original.hidden = true;
+    context.target.removeAttribute("data-ready");
+    context.target.dataset.language = code;
+    context.target.dir = isRTL(code) ? "rtl" : "ltr";
+    context.target.setAttribute("aria-live", "polite");
+    context.target.setAttribute("aria-busy", "true");
+    context.trigger.title = "Show original text";
+    context.trigger.setAttribute("aria-label", "Show original text");
+    context.trigger.setAttribute("aria-pressed", "true");
+    setTranslationLoading(context, run, `Loading ${languageName(code)} translation…`);
+
+    try {
+      const ai = window.NurLocalAI;
+      if (!ai) throw new Error("Local AI is still loading. Please try again.");
+      const onProgress = (progress = {}) => {
+        const percent = Number.isFinite(Number(progress.progress)) ? Math.round(Number(progress.progress) * 100) : null;
+        const message = progress.text || "Loading the local model…";
+        setTranslationLoading(context, run, percent == null ? message : `${message} · ${percent}%`);
+      };
+      const readiness = await ai.init({ onProgress });
+      if (run !== translationRun || controller.signal.aborted) return;
+      if (!readiness.available) throw new Error(readiness.reason);
+      setTranslationLoading(context, run, `Translating into ${languageName(code)}…`);
+      const translated = await ai.translate(context.source, { code, name: languageName(code) }, {
+        signal: controller.signal,
+        onProgress,
+        onChunk: (index, total) => setTranslationLoading(
+          context,
+          run,
+          total > 1 ? `Translating passage · part ${index} of ${total}…` : `Translating into ${languageName(code)}…`,
+        ),
+      });
+      if (run !== translationRun || controller.signal.aborted) return;
+      context.target.innerHTML = renderLocalTranslation(translated, code);
+      context.target.dataset.ready = "1";
+      context.target.setAttribute("aria-busy", "false");
+    } catch (error) {
+      if (run !== translationRun || controller.signal.aborted) return;
+      context.target.innerHTML = `<div class="notice error"><strong>Translation unavailable.</strong> ${esc(error.message || "Local AI failed.")}</div>`;
+      context.target.setAttribute("aria-busy", "false");
+    } finally {
+      if (activeTranslation?.run === run) activeTranslation = null;
+    }
+  }
+  function toggleLocalTranslation(source, original, target, trigger, event) {
+    event?.stopPropagation();
+    if (!original || !target || !trigger) return;
+    if (!languagePopover.hidden && translationContext?.trigger === trigger) {
+      closeLanguagePopover();
+      return;
+    }
+    const originalTitle = trigger.dataset.translationTitle || trigger.title;
+    const originalLabel = trigger.dataset.translationLabel || trigger.getAttribute("aria-label") || originalTitle;
+    trigger.dataset.translationTitle = originalTitle;
+    trigger.dataset.translationLabel = originalLabel;
+    const context = { source: String(source || "").trim(), original, target, trigger, originalTitle, originalLabel };
+    if (!target.hidden) {
+      closeLanguagePopover();
+      showOriginalTranslation(context);
+      return;
+    }
+    original.hidden = false;
+    if (!context.source) {
+      target.hidden = false;
+      target.innerHTML = `<div class="notice">There is no text available to translate.</div>`;
+      original.hidden = true;
+      trigger.title = "Show original text";
+      trigger.setAttribute("aria-label", "Show original text");
+      trigger.setAttribute("aria-pressed", "true");
+      return;
+    }
+    openLanguagePopover(context);
+  }
+  const languageSelect = makeSelect(languageSelectMount, {
+    options: LANGUAGES.map(({ code, name }) => ({ value: code, label: name })),
+    value: "",
+    placeholder: "Choose a language",
+    onChange: (code) => {
+      if (!code || !translationContext) return;
+      const context = translationContext;
+      closeLanguagePopover();
+      runLocalTranslation(context, code);
+    },
+  });
+  $(".cselect-btn", languageSelectMount).setAttribute("aria-label", "Choose a translation language");
+  $(".cselect-search", languageSelectMount)?.setAttribute("aria-label", "Search languages");
+  document.addEventListener("click", (event) => {
+    if (languagePopover.hidden || languagePopover.contains(event.target) || event.target.closest(".local-translate-trigger")) return;
+    closeLanguagePopover();
+  });
+  window.addEventListener("resize", closeLanguagePopover);
+
+  const CHAT_SYSTEM = [
+    "You are Nōr AI, a careful study assistant for Qur'an, Hadith, classical Tafseer, and Islamic studies.",
+    "Be respectful and clear. Do not invent quotations, references, or scholarly consensus; say when you are uncertain.",
+    "Distinguish explanation from a religious ruling. Do not issue fatwas; encourage consulting a qualified scholar for personal rulings.",
+    "Preserve the distinctions and established usage of Fiqh, Aqeedah, Tafseer, Uthmani, Madhhab, Hadith, Sunnah, and Isnad.",
+    "You have no live web access. Do not imply you checked a source unless the user supplied it.",
+  ].join(" ");
+  const chatToggle = $("#ai-chat-toggle"), chatPanel = $("#ai-chat-panel");
+  const chatProgress = $("#ai-chat-progress"), chatProgressText = $("#ai-chat-progress-text");
+  const chatProgressPercent = $("#ai-chat-progress-percent"), chatProgressTrack = $("#ai-chat-progress-track");
+  const chatProgressFill = $("#ai-chat-progress-fill"), chatRetry = $("#ai-chat-retry");
+  const chatMessagesEl = $("#ai-chat-messages"), chatForm = $("#ai-chat-form");
+  const chatInput = $("#ai-chat-input"), chatSend = $("#ai-chat-send");
+  let chatInitTask = null, chatReady = false, chatBusy = false;
+  const chatHistory = [];
+
+  function setChatProgress(progress = {}) {
+    const percent = Number.isFinite(Number(progress.progress)) ? Math.round(Number(progress.progress) * 100) : null;
+    chatProgress.hidden = false;
+    chatProgressText.textContent = progress.text || (percent == null ? "Loading local model…" : `Downloading local model · ${percent}%`);
+    chatProgressPercent.textContent = percent == null ? "" : `${percent}%`;
+    chatProgressTrack.setAttribute("aria-valuenow", String(percent ?? 0));
+    chatProgressFill.style.width = percent == null ? "30%" : `${Math.max(0, Math.min(100, percent))}%`;
+  }
+  function addChatMessage(role, text = "") {
+    const message = document.createElement("article");
+    message.className = `ai-chat-message ${role}`;
+    message.setAttribute("aria-label", role === "user" ? "You" : "Nōr AI");
+    message.textContent = text;
+    chatMessagesEl.appendChild(message);
+    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+    return message;
+  }
+  async function initializeChat() {
+    if (chatReady || chatInitTask) return chatInitTask;
+    if (!window.NurLocalAI) {
+      chatProgress.hidden = false;
+      chatProgressText.textContent = "Preparing the local AI module…";
+      return;
+    }
+    chatRetry.hidden = true;
+    chatProgress.hidden = false;
+    chatProgressText.textContent = "Checking WebGPU support…";
+    chatInitTask = window.NurLocalAI.init({ onProgress: setChatProgress });
+    try {
+      const result = await chatInitTask;
+      if (!result.available) {
+        chatProgressText.textContent = result.reason;
+        chatRetry.hidden = true;
+        return;
+      }
+      chatReady = true;
+      chatProgress.hidden = true;
+      chatInput.disabled = false;
+      chatSend.disabled = false;
+      if (!chatMessagesEl.childElementCount) {
+        addChatMessage("assistant", "As-salāmu ʿalaykum. I can help you study, but please verify important religious answers with qualified sources.");
+      }
+      if (!chatBusy) chatInput.focus();
+    } catch (error) {
+      chatProgressText.textContent = error.message || "The local model could not be loaded.";
+      chatRetry.hidden = false;
+    } finally {
+      chatInitTask = null;
+    }
+  }
+  chatToggle.addEventListener("click", () => {
+    if (chatPanel.hidden) {
+      chatPanel.hidden = false;
+      chatToggle.setAttribute("aria-expanded", "true");
+      initializeChat();
+    } else if (chatReady) {
+      chatInput.focus();
+    }
+  });
+  $("#ai-chat-close").addEventListener("click", () => {
+    chatPanel.hidden = true;
+    chatToggle.setAttribute("aria-expanded", "false");
+  });
+  $("#ai-chat-retry").addEventListener("click", initializeChat);
+  window.addEventListener("nur-local-ai-ready", () => {
+    if (!chatPanel.hidden) initializeChat();
+  });
+  chatForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const prompt = chatInput.value.trim();
+    if (!prompt || !chatReady || chatBusy) return;
+    chatInput.value = "";
+    addChatMessage("user", prompt);
+    chatHistory.push({ role: "user", content: prompt });
+    chatBusy = true;
+    chatInput.disabled = true;
+    chatSend.disabled = true;
+    const responseNode = addChatMessage("assistant");
+    try {
+      const messages = chatHistory.slice(-10);
+      const response = await window.NurLocalAI.ask(messages, {
+        system: CHAT_SYSTEM,
+        maxTokens: 512,
+        onToken: (token) => {
+          responseNode.appendChild(document.createTextNode(token));
+          chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+        },
+      });
+      chatHistory.push({ role: "assistant", content: response });
+    } catch (error) {
+      responseNode.textContent = error.message || "The local model could not complete that answer.";
+      responseNode.classList.add("error");
+    } finally {
+      chatBusy = false;
+      chatInput.disabled = !chatReady;
+      chatSend.disabled = !chatReady;
+      if (!chatPanel.hidden) chatInput.focus();
+    }
+  });
+  chatInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      chatForm.requestSubmit();
+    }
+  });
 
   const toTop = $("#to-top"); window.addEventListener("scroll", () => toTop.classList.toggle("show", window.scrollY > 500)); toTop.onclick = () => window.scrollTo({ top: 0, behavior: "smooth" });
 

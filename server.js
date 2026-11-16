@@ -10,6 +10,7 @@
 //   getAuthor(id)
 
 import express from "express";
+import https from "node:https";
 import { promises as fs } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
@@ -20,6 +21,11 @@ import * as turath from "turath-sdk";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
+const TLS_KEY_PATH = process.env.TLS_KEY_PATH;
+const TLS_CERT_PATH = process.env.TLS_CERT_PATH;
+if (Boolean(TLS_KEY_PATH) !== Boolean(TLS_CERT_PATH)) {
+  throw new Error("Set both TLS_KEY_PATH and TLS_CERT_PATH to enable HTTPS.");
+}
 
 const app = express();
 app.disable("x-powered-by");
@@ -176,7 +182,7 @@ const handle = (fn) => async (req, res) => {
     const message = e && e.message ? e.message : String(e);
     const status = e.status || (/not found|404/i.test(message) ? 404 : 502);
     console.error(`[turath] ${req.path} failed:`, message);
-    res.status(status).json({ error: "Something went wrong." });
+    res.status(status).json({ error: message });
   }
 };
 
@@ -194,17 +200,49 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ---------- the website files (only these three are served) ---------- */
+/* ---------- website modules and browser SDK assets ---------- */
 
 const sendOpts = { headers: { "Cache-Control": "no-cache" } };
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "index.html"), sendOpts));
-for (const file of ["index.html", "script.js", "style.css"]) {
+for (const file of ["index.html", "script.js", "style.css", "local-ai.js", "ai-worker.js"]) {
   app.get(`/${file}`, (req, res) => res.sendFile(path.join(__dirname, file), sendOpts));
 }
+app.get("/speech-sdk.js", (req, res) => res.sendFile(
+  path.join(__dirname, "node_modules", "microsoft-cognitiveservices-speech-sdk", "distrib", "browser", "microsoft.cognitiveservices.speech.sdk.bundle-min.js"),
+  sendOpts,
+));
 
 /* ---------- API ---------- */
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
+
+app.get("/api/recitation/token", async (_req, res) => {
+  const key = process.env.AZURE_SPEECH_KEY;
+  const region = process.env.AZURE_SPEECH_REGION;
+  if (!key || !region) {
+    console.error("[recitation] Speech service credentials are not configured.");
+    res.setHeader("Cache-Control", "no-store");
+    res.status(503).json({ error: "Recitation service is currently unavailable." });
+    return;
+  }
+  try {
+    const response = await fetch(`https://${region}.api.cognitive.microsoft.com/sts/v1.0/issueToken`, {
+      method: "POST",
+      headers: { "Ocp-Apim-Subscription-Key": key },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error(`Azure token service returned ${response.status}.`);
+    const token = (await response.text()).trim();
+    if (!token) throw new Error("Azure returned an empty speech token.");
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ token, region });
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    console.error("[recitation] Speech token request failed:", message);
+    res.setHeader("Cache-Control", "no-store");
+    res.status(502).json({ error: "Recitation service is currently unavailable." });
+  }
+});
 
 // GET /api/turath/catalog?type=author&q=الرازي
 app.get(
@@ -315,18 +353,13 @@ app.get(
   }),
 );
 
-app.use("/api", (req, res) => res.status(404).json({ error: "Something went wrong." }));
+app.use("/api", (req, res) => res.status(404).json({ error: `Unknown API endpoint: ${req.path}` }));
 
 /* ---------- start ---------- */
 
-const server = app.listen(PORT, HOST, () => {
-  console.log(`\nNūr is running →  http://localhost:${PORT}`);
-  const addresses = Object.values(os.networkInterfaces()).flat().filter(
-    (item) => item && item.family === "IPv4" && !item.internal,
-  );
-  addresses.forEach((item) => console.log(`For a phone on the same Wi-Fi →  http://${item.address}:${PORT}`));
-  console.log("\nOpen one of these addresses in your browser. Press Ctrl+C here to stop.\n");
-});
+const server = TLS_KEY_PATH
+  ? https.createServer({ key: await fs.readFile(TLS_KEY_PATH), cert: await fs.readFile(TLS_CERT_PATH) }, app)
+  : app;
 
 server.on("error", (e) => {
   if (e.code === "EADDRINUSE") {
@@ -336,6 +369,17 @@ server.on("error", (e) => {
     console.error("Server error:", e);
   }
   process.exit(1);
+});
+
+server.listen(PORT, HOST, () => {
+  const protocol = TLS_KEY_PATH ? "https" : "http";
+  console.log(`\nNūr is running →  ${protocol}://localhost:${PORT}`);
+  const addresses = Object.values(os.networkInterfaces()).flat().filter(
+    (item) => item && item.family === "IPv4" && !item.internal,
+  );
+  addresses.forEach((item) => console.log(`For a phone on the same Wi-Fi →  ${protocol}://${item.address}:${PORT}`));
+  if (!TLS_KEY_PATH) console.log("Microphone recitation on phones requires HTTPS (or localhost).");
+  console.log("\nOpen one of these addresses in your browser. Press Ctrl+C here to stop.\n");
 });
 
 process.on("unhandledRejection", (e) => console.error("Unhandled rejection:", e));

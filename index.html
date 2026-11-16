@@ -31,10 +31,6 @@
 
   <main id="app"></main>
 
-  <button id="translator-fab" class="translator-fab" aria-label="Open translator" title="Translator">
-    <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h8M8 5c0 5-1.5 9-4 11"/><path d="M5 10c1.5 3 4 5.5 7 7"/><path d="M13 20l4-10 4 10"/><path d="M14.5 16h5"/></svg>
-  </button>
-
   <button id="to-top" class="to-top" aria-label="Back to top">↑</button>
 
   <section id="audio-player" class="audio-player" aria-label="Audio player" hidden>
@@ -73,6 +69,36 @@
   <audio id="shared-audio" preload="none"></audio>
   <div id="word-tip" class="word-tip" hidden></div>
 
+  <button id="ai-chat-toggle" class="ai-chat-toggle" type="button" aria-controls="ai-chat-panel" aria-expanded="false">
+    <span class="ai-chat-toggle-mark" aria-hidden="true">✦</span><span>Nōr AI</span>
+  </button>
+  <aside id="ai-chat-panel" class="ai-chat-panel" aria-label="Nōr AI chat" hidden>
+    <header class="ai-chat-header">
+      <div><strong>Nōr AI</strong><span>Private · runs on this device</span></div>
+      <button id="ai-chat-close" class="ai-chat-close" type="button" aria-label="Close Nōr AI">×</button>
+    </header>
+    <div id="ai-chat-progress" class="ai-chat-progress" aria-live="polite">
+      <div class="ai-chat-progress-copy"><span id="ai-chat-progress-text">Preparing local AI…</span><span id="ai-chat-progress-percent"></span></div>
+      <div id="ai-chat-progress-track" class="ai-chat-progress-track" role="progressbar" aria-label="Local model download progress" aria-valuemin="0" aria-valuemax="100">
+        <span id="ai-chat-progress-fill"></span>
+      </div>
+      <button id="ai-chat-retry" class="ai-chat-retry" type="button" hidden>Try again</button>
+    </div>
+    <div id="ai-chat-messages" class="ai-chat-messages" aria-live="polite" aria-relevant="additions"></div>
+    <form id="ai-chat-form" class="ai-chat-form">
+      <textarea id="ai-chat-input" rows="1" placeholder="Ask a question…" aria-label="Message Nōr AI" disabled></textarea>
+      <button id="ai-chat-send" type="submit" aria-label="Send message" disabled>
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+      </button>
+    </form>
+    <p class="ai-chat-disclaimer">Small local model · verify important religious answers with qualified sources.</p>
+  </aside>
+
+  <div id="local-language-popover" class="local-language-popover" role="group" aria-label="Translation language" hidden>
+    <span class="local-language-popover-label">Translate to</span>
+    <div id="local-language-select"></div>
+  </div>
+
   <!-- Generic Modal -->
   <div id="modal" class="modal-overlay" hidden>
     <div class="modal-card" role="dialog" aria-modal="true">
@@ -100,38 +126,6 @@
         <input type="range" id="font-scale" min="0.85" max="1.4" step="0.05" value="1" class="slider-input" />
         <span id="font-scale-label" class="slider-label">100%</span>
       </div>
-    </div>
-  </div>
-
-  <!-- Translator Modal -->
-  <div id="translator-modal" class="modal-overlay" hidden>
-    <div class="tr-card" role="dialog" aria-modal="true">
-      <header class="tr-head">
-        <span class="tr-title">✦ Translator</span>
-        <button class="modal-close-inline" id="tr-close" aria-label="Close">×</button>
-      </header>
-      <div class="tr-langbar">
-        <div id="tr-from-mount" class="tr-lang-mount"></div>
-        <button class="tr-swap" id="tr-swap" aria-label="Swap">⇄</button>
-        <div id="tr-to-mount" class="tr-lang-mount"></div>
-      </div>
-      <div class="tr-texts">
-        <div class="tr-pane">
-          <div class="tr-pane-head"><span>Source</span><span id="tr-src-count">0</span></div>
-          <textarea id="tr-src" placeholder="Type or paste text to translate…" spellcheck="false"></textarea>
-        </div>
-        <div class="tr-pane">
-          <div class="tr-pane-head"><span>Translation</span><span id="tr-tgt-count">0</span></div>
-          <textarea id="tr-tgt" placeholder="Translation appears here…" readonly></textarea>
-        </div>
-      </div>
-      <footer class="tr-foot">
-        <span id="tr-status" class="tr-status"></span>
-        <div class="tr-actions">
-          <button class="btn btn-ghost" id="tr-copy" type="button">Copy</button>
-          <button class="btn btn-primary" id="tr-go" type="button">Translate</button>
-        </div>
-      </footer>
     </div>
   </div>
 
@@ -181,23 +175,22 @@
           <div class="toggle-row">
             <label class="toggle"><input type="checkbox" id="q-translit" /> Transliteration</label>
             <label class="toggle"><input type="checkbox" id="q-wbw" /> Word-by-word</label>
-            <label class="toggle"><input type="checkbox" id="q-tafsir-links" checked /> Tafsir/Context links</label>
-            <label class="toggle"><input type="checkbox" id="q-tajweed" /> Tajweed colors</label>
             <label class="toggle"><input type="checkbox" id="q-reading-view" /> Reading view</label>
-            <label class="toggle"><input type="checkbox" id="q-line-by-line" disabled /> Line by line</label>
-            <label class="toggle"><input type="checkbox" id="q-reading-translation" disabled /> Translation in reading view</label>
           </div>
         </section>
         <section class="quran-tool-group quran-practice-group" aria-labelledby="q-practice-label">
           <div class="quran-tool-heading">
             <h3 id="q-practice-label">Recitation practice</h3>
-            <p>Listen to an ayah or follow along with Arabic speech recognition.</p>
           </div>
           <div class="toggle-row">
             <button class="btn btn-ghost btn-sm" id="q-recitation" type="button" aria-pressed="false">Start recitation</button>
             <label class="toggle"><input type="checkbox" id="q-memorization" /> Memorization mode</label>
+            <details class="recitation-privacy">
+              <summary aria-label="Recitation privacy information" title="Recitation privacy information">i</summary>
+              <span>Live microphone audio is sent to Microsoft Azure Speech for pronunciation scoring.</span>
+            </details>
           </div>
-          <span id="q-recitation-status" class="recitation-status" role="status" aria-live="polite">Arabic speech recognition requires microphone access and a supported browser.</span>
+          <span id="q-recitation-status" class="recitation-status" role="status" aria-live="polite"></span>
         </section>
       </div>
 
@@ -267,12 +260,6 @@
       <div class="field" id="t-compare-row" hidden>
         <span class="field-label">Compare with</span>
         <div id="t-source2-mount"></div>
-      </div>
-      <div class="translate-row" id="t-translate-row">
-        <label class="switch-row">
-          <span class="switch-text"><b>Translate tafsir to English</b><small>Uses Google Translate · May take longer</small></span>
-          <span class="switch"><input type="checkbox" id="t-translate-en" /><span class="slider"></span></span>
-        </label>
       </div>
       <div id="t-out"></div>
       <div id="t-related"></div>
@@ -357,7 +344,7 @@
         <input type="number" id="r-jump" class="r-jump" min="1" step="1" placeholder="#" aria-label="Go to position in the book" title="Position in the book" />
         <button class="btn btn-ghost btn-sm" id="r-go" type="button">Go</button>
         <button class="icon-btn" id="r-bm" type="button" title="Bookmark this page" aria-label="Bookmark this page">☆</button>
-        <button class="btn btn-ghost btn-sm" id="r-translate" type="button">Translate</button>
+        <button class="icon-btn local-translate-trigger" id="r-translate" type="button" title="Translate this page" aria-label="Translate this page" aria-controls="local-language-popover" aria-expanded="false" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h8M8 5c0 5-1.5 9-4 11"/><path d="M5 10c1.5 3 4 5.5 7 7"/><path d="M13 20l4-10 4 10"/><path d="M14.5 16h5"/></svg></button>
         <a class="btn btn-ghost btn-sm" id="r-dl" href="#" download>Download book (JSON)</a>
       </div>
 
@@ -392,6 +379,8 @@
     </section>
   </template>
 
+  <script src="/speech-sdk.js"></script>
+  <script type="module" src="local-ai.js"></script>
   <script src="script.js"></script>
 </body>
 </html>
