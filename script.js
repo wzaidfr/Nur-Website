@@ -100,6 +100,36 @@ const APP = (() => {
     }
     return res.json();
   }
+  async function translateWithGoogle(text, code) {
+    const source = String(text ?? "").trim();
+    if (!source) throw new Error("There is no text to translate.");
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(code)}&dt=t&q=${encodeURIComponent(source)}`;
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+      },
+    });
+    if (!response.ok) throw new Error("Google Translate is currently unavailable.");
+    const data = await response.json();
+    const translated = Array.isArray(data?.[0]) ? data[0].map((part) => part?.[0] || "").join("") : "";
+    if (!translated) throw new Error("Google Translate returned no text.");
+    return translated;
+  }
+  async function askHostedChat(messages, options = {}) {
+    const response = await fetch("/api/ai/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages,
+        system: options.system || "",
+        maxTokens: options.maxTokens || 512,
+        temperature: options.temperature ?? 0.3,
+      }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.error || "The hosted AI service is unavailable.");
+    return String(body.answer || "").trim();
+  }
   const memo = (key, fn) => (cache[key] ??= fn().catch((e) => { delete cache[key]; throw e; }));
   function mount(id) { app.replaceChildren(document.getElementById(id).content.cloneNode(true)); }
   function safeReplaceHash(h) { try { history.replaceState(null, "", h); } catch {} }
@@ -1086,8 +1116,11 @@ const APP = (() => {
      which calls the real turath-sdk. Nothing here is mocked.
      ============================================================ */
 
-  // file:// uses localhost for desktop testing; phones must open the server's LAN URL.
-  const TURATH_BASE = location.protocol === "file:" ? "http://localhost:3000" : "";
+  const TURATH_BASE = location.protocol === "file:"
+    ? "http://localhost:3000"
+    : (location.hostname === "localhost" || location.hostname === "127.0.0.1"
+      ? ""
+      : "https://nur-website.zaidmailacc.workers.dev");
 
   async function turathGet(path, params = {}) {
     const qs = Object.entries(params)
@@ -1097,13 +1130,12 @@ const APP = (() => {
     let res;
     try { res = await fetch(`${TURATH_BASE}${path}${qs ? "?" + qs : ""}`, fetchTimeout(60000)); }
     catch (error) {
-      if (location.protocol === "file:" && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
-        throw new Error("The library server is not available at this phone's localhost. Start the server on your computer and open the LAN address printed by npm start, on the same Wi-Fi.");
-      }
       if (error.name === "TimeoutError" || error.name === "AbortError") {
         throw new Error("The library request timed out. Check the server and internet connection, then try again.");
       }
-      throw new Error("Could not connect to the library server. Keep the server running; on a phone, use the computer's LAN address on the same Wi-Fi.");
+      throw new Error(location.protocol === "file:"
+        ? "The local Turath server is not available. Run npm start in the project folder, then open http://localhost:3000."
+        : "Could not connect to the Turath API. Check your internet connection and try again.");
     }
     let body = null;
     try { body = await res.json(); } catch {}
@@ -1851,8 +1883,16 @@ const APP = (() => {
       context.target.setAttribute("aria-busy", "false");
     } catch (error) {
       if (run !== translationRun || controller.signal.aborted) return;
-      context.target.innerHTML = `<div class="notice error"><strong>Translation unavailable.</strong> ${esc(error.message || "Local AI failed.")}</div>`;
-      context.target.setAttribute("aria-busy", "false");
+      try {
+        const fallback = await translateWithGoogle(context.source, code);
+        if (run !== translationRun || controller.signal.aborted) return;
+        context.target.innerHTML = renderLocalTranslation(fallback, code);
+        context.target.dataset.ready = "1";
+        context.target.setAttribute("aria-busy", "false");
+      } catch (fallbackError) {
+        context.target.innerHTML = `<div class="notice error"><strong>Translation unavailable.</strong> ${esc(fallbackError.message || error.message || "Local AI failed.")}</div>`;
+        context.target.setAttribute("aria-busy", "false");
+      }
     } finally {
       if (activeTranslation?.run === run) activeTranslation = null;
     }
@@ -2001,17 +2041,32 @@ const APP = (() => {
     const responseNode = addChatMessage("assistant");
     try {
       const messages = chatHistory.slice(-10);
-      const response = await window.NurLocalAI.ask(messages, {
-        system: CHAT_SYSTEM,
-        maxTokens: 512,
-        onToken: (token) => {
-          responseNode.appendChild(document.createTextNode(token));
-          chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
-        },
-      });
+      let response = "";
+      try {
+        response = await askHostedChat(messages, {
+          system: CHAT_SYSTEM,
+          maxTokens: 512,
+        });
+      } catch (hostError) {
+        if (!window.NurLocalAI) {
+          throw hostError;
+        }
+        response = await window.NurLocalAI.ask(messages, {
+          system: CHAT_SYSTEM,
+          maxTokens: 512,
+          onToken: (token) => {
+            responseNode.appendChild(document.createTextNode(token));
+            chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+          },
+        });
+      }
+      if (!response) throw new Error("The AI service returned an empty answer.");
+      responseNode.textContent = response;
       chatHistory.push({ role: "assistant", content: response });
     } catch (error) {
-      responseNode.textContent = error.message || "The local model could not complete that answer.";
+      const message = String(error?.message || "");
+      const limitReached = /limit|quota|429|rate limit|billing|too many requests|exhausted|overload/i.test(message);
+      responseNode.textContent = limitReached ? "Our limit has been reached. I am sorry" : (message || "The local model could not complete that answer.");
       responseNode.classList.add("error");
     } finally {
       chatBusy = false;

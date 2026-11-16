@@ -1,4 +1,5 @@
-const MODEL_ID = "Qwen2.5-1.5B-Instruct-q4f16_1-MLC";
+const MODEL_ID = "Qwen2.5-0.5B-Instruct-q4f16_1-MLC";
+const INIT_TIMEOUT_MS = 120000;
 const LANGUAGE_NAMES = typeof Intl.DisplayNames === "function"
   ? new Intl.DisplayNames(["en"], { type: "language" })
   : null;
@@ -16,6 +17,7 @@ let worker = null;
 let workerReady = false;
 let readyPromise = null;
 let pendingInit = null;
+let initTimeout = null;
 let nextRequestId = 0;
 let requestQueue = Promise.resolve();
 const progressListeners = new Set();
@@ -35,17 +37,24 @@ function settleRequest(requestId, error, result) {
   else request.resolve(result);
 }
 
+function clearInitTimeout() {
+  if (initTimeout !== null) clearTimeout(initTimeout);
+  initTimeout = null;
+}
+
 function handleWorkerMessage(event) {
   const message = event.data || {};
   if (message.type === "progress") {
     emitProgress(message.progress || {});
   } else if (message.type === "ready") {
+    clearInitTimeout();
     workerReady = true;
     if (pendingInit) {
       pendingInit.resolve();
       pendingInit = null;
     }
   } else if (message.type === "init-error") {
+    clearInitTimeout();
     if (pendingInit) {
       pendingInit.reject(new Error(message.error || "The local model could not start."));
       pendingInit = null;
@@ -66,6 +75,7 @@ function handleWorkerMessage(event) {
 }
 
 function failWorker(error) {
+  clearInitTimeout();
   const failedWorker = worker;
   worker = null;
   workerReady = false;
@@ -86,6 +96,9 @@ function startWorker() {
   const startup = new Promise((resolve, reject) => {
     pendingInit = { resolve, reject };
   });
+  initTimeout = setTimeout(() => {
+    failWorker(new Error("Loading the local AI model timed out. Check your connection and try again."));
+  }, INIT_TIMEOUT_MS);
   readyPromise = startup.catch((error) => {
     const failedWorker = worker;
     worker = null;
