@@ -23,6 +23,7 @@
       <a href="#/tafsir" data-nav="tafsir">Tafsir</a>
       <a href="#/hadith" data-nav="hadith">Hadith</a>
       <a href="#/library" data-nav="library">Library</a>
+      <a href="#/lexicon" data-nav="lexicon">Lexicon</a>
       <a href="#/bookmarks" data-nav="bookmarks">Saved</a>
       <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">⚙</button>
     </nav>
@@ -36,6 +37,39 @@
 
   <button id="to-top" class="to-top" aria-label="Back to top">↑</button>
 
+  <section id="audio-player" class="audio-player" aria-label="Audio player" hidden>
+    <div class="audio-player-inner">
+      <div class="audio-player-title">
+        <strong id="player-title">Qur'an audio</strong>
+        <span id="player-status">Ready</span>
+      </div>
+      <div class="audio-player-controls">
+        <button class="icon-btn" id="player-prev" type="button" aria-label="Previous ayah or surah" title="Previous">|◀</button>
+        <button class="audio-btn" id="player-toggle" type="button" aria-label="Play audio"><span id="player-toggle-icon">▶</span></button>
+        <button class="icon-btn" id="player-next" type="button" aria-label="Next ayah or surah" title="Next">▶|</button>
+      </div>
+      <div class="audio-player-seek">
+        <span id="player-current-time">0:00</span>
+        <input id="player-progress" type="range" min="0" max="1000" value="0" aria-label="Seek audio" />
+        <span id="player-duration">0:00</span>
+      </div>
+      <label class="player-volume" title="Volume">
+        <span aria-hidden="true">🔊</span>
+        <input id="player-volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume" />
+      </label>
+      <label class="player-speed">
+        <span>Speed</span>
+        <select id="player-speed" aria-label="Playback speed">
+          <option value="1">1×</option>
+          <option value="1.25">1.25×</option>
+          <option value="1.5">1.5×</option>
+          <option value="1.75">1.75×</option>
+          <option value="2">2×</option>
+        </select>
+      </label>
+      <button class="icon-btn player-close" id="player-close" type="button" aria-label="Close audio player" title="Close">×</button>
+    </div>
+  </section>
   <audio id="shared-audio" preload="none"></audio>
   <div id="word-tip" class="word-tip" hidden></div>
 
@@ -118,6 +152,7 @@
         <a class="card" href="#/tafsir" style="--i:1"><span class="card-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 13 9 5 9-5"/></svg></span><h3>Tafsir</h3><p>Classical commentary from the great mufassirūn.</p><span class="card-cta">Open <i>→</i></span></a>
         <a class="card" href="#/hadith" style="--i:2"><span class="card-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v16"/><path d="M9 4v16"/><path d="m13.5 5 4-1 3.5 15-4 1-3.5-15Z"/></svg></span><h3>Hadith</h3><p>The six books, searchable across all collections.</p><span class="card-cta">Open <i>→</i></span></a>
         <a class="card" href="#/library" style="--i:3"><span class="card-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/><path d="M8.5 11h5M11 8.5v5" opacity="0"/><path d="M8.5 9.5h5M8.5 12.5h3"/></svg></span><h3>Library</h3><p>Search classical Islamic books on Turath and read the page.</p><span class="card-cta">Open <i>→</i></span></a>
+        <a class="card" href="#/lexicon" style="--i:4"><span class="card-icon">لِسَان</span><h3>Arabic Lexicon</h3><p>Look up Arabic words in classical dictionaries.</p><span class="card-cta">Open <i>→</i></span></a>
       </div>
     </section>
   </template>
@@ -137,11 +172,33 @@
         <div class="field grow"><span class="field-label">Reciter</span><div id="q-reciter-mount"></div></div>
       </div>
 
-      <div class="toggle-row">
-        <label class="toggle"><input type="checkbox" id="q-translit" /> Transliteration</label>
-        <label class="toggle"><input type="checkbox" id="q-wbw" /> Word-by-word</label>
-        <label class="toggle"><input type="checkbox" id="q-tafsir-links" checked /> Tafsir/Context links</label>
-        <label class="toggle"><input type="checkbox" id="q-tajweed" /> Tajweed colors</label>
+      <div class="quran-toolbox panel">
+        <section class="quran-tool-group" aria-labelledby="q-display-label">
+          <div class="quran-tool-heading">
+            <h3 id="q-display-label">Reading & display</h3>
+            <p>Reading view shows 16 Uthmani ayahs per page; tap an ayah to hear only that verse.</p>
+          </div>
+          <div class="toggle-row">
+            <label class="toggle"><input type="checkbox" id="q-translit" /> Transliteration</label>
+            <label class="toggle"><input type="checkbox" id="q-wbw" /> Word-by-word</label>
+            <label class="toggle"><input type="checkbox" id="q-tafsir-links" checked /> Tafsir/Context links</label>
+            <label class="toggle"><input type="checkbox" id="q-tajweed" /> Tajweed colors</label>
+            <label class="toggle"><input type="checkbox" id="q-reading-view" /> Reading view</label>
+            <label class="toggle"><input type="checkbox" id="q-line-by-line" disabled /> Line by line</label>
+            <label class="toggle"><input type="checkbox" id="q-reading-translation" disabled /> Translation in reading view</label>
+          </div>
+        </section>
+        <section class="quran-tool-group quran-practice-group" aria-labelledby="q-practice-label">
+          <div class="quran-tool-heading">
+            <h3 id="q-practice-label">Recitation practice</h3>
+            <p>Listen to an ayah or follow along with Arabic speech recognition.</p>
+          </div>
+          <div class="toggle-row">
+            <button class="btn btn-ghost btn-sm" id="q-recitation" type="button" aria-pressed="false">Start recitation</button>
+            <label class="toggle"><input type="checkbox" id="q-memorization" /> Memorization mode</label>
+          </div>
+          <span id="q-recitation-status" class="recitation-status" role="status" aria-live="polite">Arabic speech recognition requires microphone access and a supported browser.</span>
+        </section>
       </div>
 
       <div class="audio-bar">
@@ -156,9 +213,39 @@
       </div>
 
       <div id="q-out" class="reader"></div>
-      <div class="pager">
-        <button class="btn btn-ghost" id="q-prev">← Previous</button>
-        <button class="btn btn-ghost" id="q-next">Next →</button>
+      <div class="pager" id="q-surah-pager" aria-label="Surah navigation">
+        <button class="btn btn-ghost" id="q-prev">← Previous surah</button>
+        <button class="btn btn-ghost" id="q-next">Next surah →</button>
+      </div>
+    </section>
+  </template>
+
+  <!-- ARABIC LEXICON -->
+  <template id="tpl-lexicon">
+    <section class="view container">
+      <div class="page-head">
+        <h2>Arabic Lexicon</h2>
+        <p>Search classical Arabic dictionaries by word or root.</p>
+      </div>
+      <form id="lexicon-form" class="panel controls lexicon-form" autocomplete="off">
+        <label class="field grow"><span class="field-label">Arabic word or root</span><input type="search" id="lexicon-query" dir="rtl" placeholder="مثال: كتب" required /></label>
+        <label class="field grow"><span class="field-label">Dictionary</span>
+          <select id="lexicon-book">
+            <option value="1687">Lisān al-ʿArab · لسان العرب</option>
+            <option value="21710">Maqāyīs al-Lughah · مقاييس اللغة</option>
+            <option value="7030">Tāj al-ʿArūs · تاج العروس</option>
+            <option value="7283">Al-Qāmūs al-Muḥīṭ · القاموس المحيط</option>
+          </select>
+        </label>
+        <button class="btn btn-primary" type="submit">Search</button>
+      </form>
+      <p class="lexicon-note">Entries are retrieved from the selected classical dictionary.</p>
+      <p id="lexicon-status" class="status" role="status" aria-live="polite"></p>
+      <div id="lexicon-out"></div>
+      <div id="lexicon-pager" class="pager lexicon-pager" hidden>
+        <button class="btn btn-ghost" id="lexicon-prev" type="button">← Previous</button>
+        <span id="lexicon-page-info" class="page-info"></span>
+        <button class="btn btn-ghost" id="lexicon-next" type="button">Next →</button>
       </div>
     </section>
   </template>

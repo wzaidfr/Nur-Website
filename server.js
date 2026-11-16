@@ -19,7 +19,7 @@ import * as turath from "turath-sdk";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
-const HOST = process.env.HOST || "127.0.0.1";
+const HOST = process.env.HOST || "0.0.0.0";
 
 const app = express();
 app.disable("x-powered-by");
@@ -57,6 +57,17 @@ async function cached(key, fn) {
   return value;
 }
 
+async function retryTransient(fn) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await fn(); }
+    catch (error) {
+      const message = String(error && error.message ? error.message : error);
+      if (attempt >= 2 || /\b(?:400|401|403|404)\b|not found/i.test(message)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+    }
+  }
+}
+
 // The public SDK supports author/book IDs, while Turath's searchable catalog is
 // distributed as a SQLite metadata snapshot.
 const CATALOG_URL = "https://files.turath.io/data-v4.sqlite";
@@ -66,15 +77,20 @@ let catalogPromise;
 
 async function downloadCatalog() {
   const tempPath = `${CATALOG_PATH}.${process.pid}.tmp`;
-  const response = await fetch(CATALOG_URL);
-  if (!response.ok) throw new Error(`Turath catalog download failed (${response.status}).`);
-
-  try {
-    await fs.writeFile(tempPath, Buffer.from(await response.arrayBuffer()));
-    await fs.rename(tempPath, CATALOG_PATH);
-  } catch (e) {
-    await fs.rm(tempPath, { force: true });
-    throw e;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await fetch(CATALOG_URL, { signal: AbortSignal.timeout(30000) });
+      if (!response.ok) throw new Error(`Turath catalog download failed (${response.status}).`);
+      const contents = Buffer.from(await response.arrayBuffer());
+      if (contents.length < 1_000_000) throw new Error("Turath catalog download was incomplete.");
+      await fs.writeFile(tempPath, contents);
+      await fs.rename(tempPath, CATALOG_PATH);
+      return;
+    } catch (error) {
+      await fs.rm(tempPath, { force: true });
+      if (attempt >= 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+    }
   }
 }
 
@@ -90,12 +106,16 @@ async function getCatalog() {
       }
       if (!fresh) await downloadCatalog();
 
-      const db = new DatabaseSync(CATALOG_PATH, { readOnly: true });
-      if (!db.prepare("SELECT data_version FROM snapshot_meta").get()) {
-        db.close();
-        throw new Error("The Turath catalog snapshot is invalid.");
+      let db;
+      try {
+        db = new DatabaseSync(CATALOG_PATH, { readOnly: true });
+        if (!db.prepare("SELECT data_version FROM snapshot_meta").get()) throw new Error("The Turath catalog snapshot is invalid.");
+        return db;
+      } catch (error) {
+        if (db) db.close();
+        await fs.rm(CATALOG_PATH, { force: true });
+        throw error;
       }
-      return db;
     })().catch((e) => {
       catalogPromise = null;
       throw e;
@@ -156,9 +176,7 @@ const handle = (fn) => async (req, res) => {
     const message = e && e.message ? e.message : String(e);
     const status = e.status || (/not found|404/i.test(message) ? 404 : 502);
     console.error(`[turath] ${req.path} failed:`, message);
-    res.status(status).json({
-      error: status === 502 ? `Turath request failed: ${message}` : message,
-    });
+    res.status(status).json({ error: "Something went wrong." });
   }
 };
 
@@ -227,7 +245,7 @@ app.get(
 
     const key = "search:" + JSON.stringify([q, options]);
     const raw = await cached(key, () =>
-      turath.search(q, Object.keys(options).length ? options : undefined),
+      retryTransient(() => turath.search(q, Object.keys(options).length ? options : undefined)),
     );
     logShape("search", raw);
 
@@ -249,7 +267,7 @@ app.get(
   handle(async (req) => {
     const book = intParam(req.query.book, "book");
     const page = intParam(req.query.page, "page", { max: 10000000 });
-    const raw = await cached(`page:${book}:${page}`, () => turath.getPage(book, page));
+    const raw = await cached(`page:${book}:${page}`, () => retryTransient(() => turath.getPage(book, page)));
     logShape("page", raw);
     const text =
       typeof raw === "string"
@@ -265,7 +283,7 @@ app.get(
   "/api/turath/book/:id",
   handle(async (req) => {
     const id = intParam(req.params.id, "id");
-    const raw = await cached(`book:${id}`, () => turath.getBookInfo(id));
+    const raw = await cached(`book:${id}`, () => retryTransient(() => turath.getBookInfo(id)));
     logShape("book info", raw);
     const { indexes = null, ...rest } = raw && typeof raw === "object" ? raw : {};
     return { id, meta: (raw && raw.meta) || rest, indexes };
@@ -277,7 +295,7 @@ app.get(
   "/api/turath/author/:id",
   handle(async (req) => {
     const id = intParam(req.params.id, "id");
-    const raw = await cached(`author:${id}`, () => turath.getAuthor(id));
+    const raw = await cached(`author:${id}`, () => retryTransient(() => turath.getAuthor(id)));
     logShape("author", raw);
     return { id, author: raw };
   }),
@@ -288,7 +306,7 @@ app.get(
   "/api/turath/book/:id/file",
   handle(async (req, res) => {
     const id = intParam(req.params.id, "id");
-    const raw = await turath.getBookFile(id); // not cached: can be very large
+    const raw = await retryTransient(() => turath.getBookFile(id)); // not cached: can be very large
     logShape("book file", raw);
     if (req.query.download) {
       res.setHeader("Content-Disposition", `attachment; filename="turath-book-${id}.json"`);
@@ -297,13 +315,17 @@ app.get(
   }),
 );
 
-app.use("/api", (req, res) => res.status(404).json({ error: "Unknown API route." }));
+app.use("/api", (req, res) => res.status(404).json({ error: "Something went wrong." }));
 
 /* ---------- start ---------- */
 
 const server = app.listen(PORT, HOST, () => {
-  console.log(`\nNūr is running →  http://localhost:${PORT}\n`);
-  console.log("Open that address in your browser. Press Ctrl+C here to stop.\n");
+  console.log(`\nNūr is running →  http://localhost:${PORT}`);
+  const addresses = Object.values(os.networkInterfaces()).flat().filter(
+    (item) => item && item.family === "IPv4" && !item.internal,
+  );
+  addresses.forEach((item) => console.log(`For a phone on the same Wi-Fi →  http://${item.address}:${PORT}`));
+  console.log("\nOpen one of these addresses in your browser. Press Ctrl+C here to stop.\n");
 });
 
 server.on("error", (e) => {
