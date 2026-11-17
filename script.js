@@ -118,20 +118,34 @@ const APP = (() => {
     for (const chunk of chunks) {
       let result;
       try {
-        result = await getJSON(`${TURATH_BASE}/api/translate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify({ text: chunk, target: targetCode, source: sourceCode }),
-          signal,
+        const url = new URL("https://translate.googleapis.com/translate_a/single");
+        url.search = new URLSearchParams({
+          client: "gtx",
+          sl: sourceCode,
+          tl: targetCode,
+          dt: "t",
+          q: chunk,
+        }).toString();
+        const timeoutSignal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+          ? AbortSignal.timeout(10000)
+          : undefined;
+        const requestSignal = signal && timeoutSignal && typeof AbortSignal.any === "function"
+          ? AbortSignal.any([signal, timeoutSignal])
+          : (signal || timeoutSignal);
+        result = await getJSON(url.toString(), {
+          headers: { Accept: "application/json" },
+          ...(requestSignal ? { signal: requestSignal } : {}),
         });
       } catch (error) {
         if (error.name === "TypeError") {
-          throw new Error("Could not connect to the translation service. Check your connection and try again.");
+          throw new Error("Could not connect to Google Translate. Check your connection and try again.");
         }
+        if (error.name === "TimeoutError") throw new Error("Google Translate took too long to respond. Please try again.");
         throw error;
       }
-      if (!result.translatedText) throw new Error("The translation service returned no text.");
-      translated.push(result.translatedText);
+      const translatedText = Array.isArray(result?.[0]) ? result[0].map((part) => part?.[0] || "").join("") : "";
+      if (!translatedText) throw new Error("Google Translate returned no text.");
+      translated.push(translatedText);
     }
     return translated.join(" ");
   }

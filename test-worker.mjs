@@ -49,11 +49,9 @@ test("Cloudflare Worker rejects invalid translation input", async () => {
   }
 });
 
-test("Cloudflare Worker falls back to Cloudflare AI when Google is rate-limited", async () => {
+test("Cloudflare Worker reports a Google rate limit instead of returning bad translation", async () => {
   const originalFetch = globalThis.fetch;
   const requestedHosts = [];
-  const aiCalls = [];
-  const text = "مرحبا ".repeat(100);
   globalThis.fetch = async (url) => {
     const parsedUrl = new URL(url);
     requestedHosts.push(parsedUrl.hostname);
@@ -64,30 +62,18 @@ test("Cloudflare Worker falls back to Cloudflare AI when Google is rate-limited"
     const response = await worker.fetch(new Request("https://nur.example/api/translate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, target: "en" }),
-    }), {
-      AI: {
-        async run(model, input) {
-          aiCalls.push({ model, input });
-          return { translated_text: "Hello" };
-        },
-      },
-    });
+      body: JSON.stringify({ text: "hello", target: "es", source: "en" }),
+    }), {});
 
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { translatedText: "Hello Hello" });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { error: "Google Translate returned 429. Please try again." });
     assert.deepEqual(requestedHosts, ["translate.google.com", "translate.google.com"]);
-    assert.equal(aiCalls.length, 2);
-    assert.equal(aiCalls[0].model, "@cf/meta/m2m100-1.2b");
-    assert.equal(aiCalls[0].input.source_lang, "ar");
-    assert.equal(aiCalls[0].input.target_lang, "en");
-    assert.ok(aiCalls.every(({ input }) => input.text.length <= 450));
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("Cloudflare Worker falls back to Cloudflare AI when Google cannot be reached", async () => {
+test("Cloudflare Worker reports a network failure without fabricating translation", async () => {
   const originalFetch = globalThis.fetch;
   let attempts = 0;
   globalThis.fetch = async () => {
@@ -100,16 +86,10 @@ test("Cloudflare Worker falls back to Cloudflare AI when Google cannot be reache
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: "hello", target: "es", source: "en" }),
-    }), {
-      AI: {
-        async run() {
-          return { translated_text: "Hola" };
-        },
-      },
-    });
+    }), {});
 
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { translatedText: "Hola" });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { error: "Google Translate returned no response. Please try again." });
     assert.equal(attempts, 2);
   } finally {
     globalThis.fetch = originalFetch;

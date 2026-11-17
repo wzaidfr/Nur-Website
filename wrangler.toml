@@ -2,8 +2,5 @@ name = "nur-website"
 main = "worker.js"
 compatibility_date = "2026-11-16"
 
-[ai]
-binding = "AI"
-
 [vars]
 APP_NAME = "Nūr Worker"

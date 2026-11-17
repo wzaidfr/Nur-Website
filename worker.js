@@ -106,35 +106,6 @@ function getPathId(pathname) {
   return parts[parts.length - 1] || "";
 }
 
-async function translateWithCloudflareAI(env, text, source, target) {
-  const chunks = [];
-  for (let start = 0; start < text.length;) {
-    let end = Math.min(start + 450, text.length);
-    if (end < text.length) {
-      const boundary = text.lastIndexOf(" ", end);
-      if (boundary > start) end = boundary;
-    }
-    chunks.push(text.slice(start, end).trim());
-    start = end;
-  }
-
-  const translated = [];
-  for (const chunk of chunks) {
-    const detectedSource = source === "auto"
-      ? (/\p{Script=Arabic}/u.test(chunk) ? "ar" : "en")
-      : source.split("-")[0];
-    const result = await env.AI.run("@cf/meta/m2m100-1.2b", {
-      text: chunk,
-      source_lang: detectedSource,
-      target_lang: target.split("-")[0],
-    });
-    const translatedText = result?.translated_text?.trim();
-    if (!translatedText) throw new Error("Cloudflare AI returned no translation.");
-    translated.push(translatedText);
-  }
-  return translated.join(" ");
-}
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -190,20 +161,15 @@ export default {
         if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 250));
       }
 
-      if (response?.ok) {
-        let data;
-        try { data = await response.json(); } catch {}
-        const translatedText = Array.isArray(data?.[0]) ? data[0].map((part) => part?.[0] || "").join("") : "";
-        if (translatedText) return jsonResponse({ translatedText });
+      if (!response?.ok) {
+        return jsonResponse({ error: `Google Translate returned ${response ? response.status : "no response"}. Please try again.` }, { status: 502 });
       }
-
-      try {
-        return jsonResponse({ translatedText: await translateWithCloudflareAI(env, text, source, target) });
-      } catch (error) {
-        const message = error.message || String(error);
-        console.error("[translate] Google and Cloudflare AI translation failed:", message);
-        return jsonResponse({ error: `Translation unavailable: ${message}` }, { status: 502 });
-      }
+      let data;
+      try { data = await response.json(); }
+      catch { return jsonResponse({ error: "Google Translate returned an invalid response." }, { status: 502 }); }
+      const translatedText = Array.isArray(data?.[0]) ? data[0].map((part) => part?.[0] || "").join("") : "";
+      if (!translatedText) return jsonResponse({ error: "Google Translate returned no text." }, { status: 502 });
+      return jsonResponse({ translatedText });
     }
 
     if (url.pathname === "/api/turath/catalog") {
