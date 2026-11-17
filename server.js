@@ -233,13 +233,16 @@ app.post("/api/translate", handle(async (req) => {
     throw httpError(400, "Choose valid source and target languages.");
   }
 
-  const url = new URL("https://translate.googleapis.com/translate_a/single");
+  const url = new URL("https://translate.google.com/translate_a/single");
   url.search = new URLSearchParams({ client: "gtx", sl: source, tl: target, dt: "t", q: text }).toString();
   let response;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       response = await fetch(url, {
-        headers: { Accept: "application/json" },
+        headers: {
+          Accept: "application/json",
+          "User-Agent": "Mozilla/5.0 (compatible; NurWebsite/1.0)",
+        },
         signal: AbortSignal.timeout(15000),
       });
       if (response.ok || (response.status < 500 && response.status !== 429)) break;
@@ -252,13 +255,14 @@ app.post("/api/translate", handle(async (req) => {
     if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
-  if (!response.ok) throw httpError(502, `The translation service returned ${response.status}. Please try again.`);
-  let data;
-  try { data = await response.json(); }
-  catch { throw httpError(502, "The translation service returned an invalid response."); }
-  const translatedText = Array.isArray(data?.[0]) ? data[0].map((part) => part?.[0] || "").join("") : "";
-  if (!translatedText) throw httpError(502, "The translation service returned no text.");
-  return { translatedText };
+  if (response?.ok) {
+    let data;
+    try { data = await response.json(); } catch {}
+    const translatedText = Array.isArray(data?.[0]) ? data[0].map((part) => part?.[0] || "").join("") : "";
+    if (translatedText) return { translatedText };
+  }
+
+  throw httpError(502, `The translation service returned ${response ? response.status : "no response"}. Please try again.`);
 }));
 
 app.get("/api/recitation/token", async (_req, res) => {

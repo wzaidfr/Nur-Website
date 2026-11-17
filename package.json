@@ -5,7 +5,8 @@
   "main": "script.js",
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js",
-    "test": "node test-turath.mjs"
+    "test": "node test-turath.mjs",
+    "test:worker": "node --test test-worker.mjs"
   },
   "keywords": [],
   "author": "",
