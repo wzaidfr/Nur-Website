@@ -69,35 +69,19 @@
   <audio id="shared-audio" preload="none"></audio>
   <div id="word-tip" class="word-tip" hidden></div>
 
-  <button id="ai-chat-toggle" class="ai-chat-toggle" type="button" aria-controls="ai-chat-panel" aria-expanded="false">
-    <span class="ai-chat-toggle-mark" aria-hidden="true">✦</span><span>Nōr AI</span>
+  <button id="translate-toggle" class="translate-toggle" type="button" aria-controls="translate-panel" aria-expanded="false" aria-label="Open translator">
+    <span aria-hidden="true">文</span><span>Translate</span>
   </button>
-  <aside id="ai-chat-panel" class="ai-chat-panel" aria-label="Nōr AI chat" hidden>
-    <header class="ai-chat-header">
-      <div><strong>Nōr AI</strong><span>Private · runs on this device</span></div>
-      <button id="ai-chat-close" class="ai-chat-close" type="button" aria-label="Close Nōr AI">×</button>
-    </header>
-    <div id="ai-chat-progress" class="ai-chat-progress" aria-live="polite">
-      <div class="ai-chat-progress-copy"><span id="ai-chat-progress-text">Preparing local AI…</span><span id="ai-chat-progress-percent"></span></div>
-      <div id="ai-chat-progress-track" class="ai-chat-progress-track" role="progressbar" aria-label="Local model download progress" aria-valuemin="0" aria-valuemax="100">
-        <span id="ai-chat-progress-fill"></span>
-      </div>
-      <button id="ai-chat-retry" class="ai-chat-retry" type="button" hidden>Try again</button>
+  <aside id="translate-panel" class="translate-panel" aria-label="Translator" hidden>
+    <header><strong>Google Translate</strong><button id="translate-close" type="button" aria-label="Close translator">×</button></header>
+    <div class="translate-languages">
+      <label>From<select id="translate-source"></select></label>
+      <label>To<select id="translate-target"></select></label>
     </div>
-    <div id="ai-chat-messages" class="ai-chat-messages" aria-live="polite" aria-relevant="additions"></div>
-    <form id="ai-chat-form" class="ai-chat-form">
-      <textarea id="ai-chat-input" rows="1" placeholder="Ask a question…" aria-label="Message Nōr AI" disabled></textarea>
-      <button id="ai-chat-send" type="submit" aria-label="Send message" disabled>
-        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
-      </button>
-    </form>
-    <p class="ai-chat-disclaimer">Small local model · verify important religious answers with qualified sources.</p>
+    <textarea id="translate-input" rows="4" placeholder="Enter text to translate"></textarea>
+    <button id="translate-submit" class="btn btn-primary" type="button">Translate</button>
+    <div id="translate-output" class="translate-output" aria-live="polite"></div>
   </aside>
-
-  <div id="local-language-popover" class="local-language-popover" role="group" aria-label="Translation language" hidden>
-    <span class="local-language-popover-label">Translate to</span>
-    <div id="local-language-select"></div>
-  </div>
 
   <!-- Generic Modal -->
   <div id="modal" class="modal-overlay" hidden>
@@ -344,7 +328,7 @@
         <input type="number" id="r-jump" class="r-jump" min="1" step="1" placeholder="#" aria-label="Go to position in the book" title="Position in the book" />
         <button class="btn btn-ghost btn-sm" id="r-go" type="button">Go</button>
         <button class="icon-btn" id="r-bm" type="button" title="Bookmark this page" aria-label="Bookmark this page">☆</button>
-        <button class="icon-btn local-translate-trigger" id="r-translate" type="button" title="Translate this page" aria-label="Translate this page" aria-controls="local-language-popover" aria-expanded="false" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h8M8 5c0 5-1.5 9-4 11"/><path d="M5 10c1.5 3 4 5.5 7 7"/><path d="M13 20l4-10 4 10"/><path d="M14.5 16h5"/></svg></button>
+        <button class="icon-btn local-translate-trigger" id="r-translate" type="button" title="Translate to English" aria-label="Translate to English" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h8M8 5c0 5-1.5 9-4 11"/><path d="M5 10c1.5 3 4 5.5 7 7"/><path d="M13 20l4-10 4 10"/><path d="M14.5 16h5"/></svg></button>
         <a class="btn btn-ghost btn-sm" id="r-dl" href="#" download>Download book (JSON)</a>
       </div>
 
@@ -380,7 +364,6 @@
   </template>
 
   <script src="/speech-sdk.js"></script>
-  <script type="module" src="local-ai.js"></script>
   <script src="script.js"></script>
 </body>
 </html>

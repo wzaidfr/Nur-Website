@@ -100,11 +100,12 @@ const APP = (() => {
     }
     return res.json();
   }
-  async function translateWithGoogle(text, code) {
+  async function translateWithGoogle(text, code, sourceCode = "auto", signal) {
     const source = String(text ?? "").trim();
     if (!source) throw new Error("There is no text to translate.");
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(code)}&dt=t&q=${encodeURIComponent(source)}`;
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(sourceCode)}&tl=${encodeURIComponent(code)}&dt=t&q=${encodeURIComponent(source)}`;
     const response = await fetch(url, {
+      signal,
       headers: {
         Accept: "application/json",
       },
@@ -114,21 +115,6 @@ const APP = (() => {
     const translated = Array.isArray(data?.[0]) ? data[0].map((part) => part?.[0] || "").join("") : "";
     if (!translated) throw new Error("Google Translate returned no text.");
     return translated;
-  }
-  async function askHostedChat(messages, options = {}) {
-    const response = await fetch("/api/ai/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages,
-        system: options.system || "",
-        maxTokens: options.maxTokens || 512,
-        temperature: options.temperature ?? 0.3,
-      }),
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body?.error || "The hosted AI service is unavailable.");
-    return String(body.answer || "").trim();
   }
   const memo = (key, fn) => (cache[key] ??= fn().catch((e) => { delete cache[key]; throw e; }));
   function mount(id) { app.replaceChildren(document.getElementById(id).content.cloneNode(true)); }
@@ -978,7 +964,7 @@ const APP = (() => {
   function tafsirCardHTML(meta, text) {
     return `<div class="tafsir-card">
       <header class="tafsir-card-head"><div><h3>${esc(meta?.name || "Tafsir")}</h3><p class="by">${esc(meta?.author || "")}</p></div>
-        <button type="button" class="icon-btn local-translate-trigger" title="Translate this commentary" aria-label="Translate this commentary" aria-controls="local-language-popover" aria-expanded="false" aria-pressed="false">${TR_ICON}</button>
+        <button type="button" class="icon-btn local-translate-trigger" title="Translate to English" aria-label="Translate to English" aria-pressed="false">${TR_ICON}</button>
       </header>
       <div class="tafsir-body rtl">${text ? sanitize(text) : "<p>No commentary text returned for this verse.</p>"}</div>
       <div class="tafsir-translation lib-trans" hidden></div>
@@ -1363,7 +1349,7 @@ const APP = (() => {
         <div class="lib-trans" hidden></div>
         <div class="lib-actions">
           ${readHref ? `<a class="btn btn-primary btn-sm" href="${readHref}">Read page</a>` : ""}
-          <button type="button" class="icon-btn local-translate-trigger" data-act="translate" title="Translate with local AI" aria-label="Translate with local AI" aria-controls="local-language-popover" aria-expanded="false" aria-pressed="false">${TR_ICON}</button>
+          <button type="button" class="icon-btn local-translate-trigger" data-act="translate" title="Translate to English" aria-label="Translate to English" aria-pressed="false">${TR_ICON}</button>
           ${hasFull ? `<button type="button" class="lib-chip-btn" data-act="full">Full passage</button>` : ""}
           ${authorId != null ? `<button type="button" class="lib-chip-btn" data-act="author">Only this author</button>` : ""}
           ${bookId != null ? `<button type="button" class="lib-chip-btn" data-act="book">Only this book</button>` : ""}
@@ -1763,24 +1749,15 @@ const APP = (() => {
   const languageName = (code) => LANGUAGES.find((language) => language.code === code)?.name || code;
   const isRTL = (code) => RTL_LANGS.has(String(code).split("-")[0]);
 
-  const languagePopover = $("#local-language-popover");
-  const languageSelectMount = $("#local-language-select");
-  let translationContext = null, translationRun = 0, activeTranslation = null;
-
+  let translationRun = 0, activeTranslation = null;
   function resetTranslationTrigger(context) {
     context.trigger.title = context.originalTitle;
     context.trigger.setAttribute("aria-label", context.originalLabel);
     context.trigger.setAttribute("aria-pressed", "false");
-    context.trigger.setAttribute("aria-expanded", "false");
   }
   function closeLanguagePopover() {
-    if (!languagePopover || languagePopover.hidden) return;
-    const panel = $(".cselect-panel", languageSelectMount);
-    if (panel) panel.hidden = true;
-    $(".cselect", languageSelectMount)?.classList.remove("is-open");
-    languagePopover.hidden = true;
-    if (translationContext?.trigger?.isConnected) translationContext.trigger.setAttribute("aria-expanded", "false");
-    translationContext = null;
+    $("#translate-panel").hidden = true;
+    $("#translate-toggle").setAttribute("aria-expanded", "false");
   }
   function cancelActiveTranslation(target) {
     if (!activeTranslation || (target && activeTranslation.context.target !== target)) return;
@@ -1788,133 +1765,58 @@ const APP = (() => {
     activeTranslation = null;
     active.controller.abort();
     translationRun++;
-    const { context } = active;
-    if (context.target.isConnected && !context.target.dataset.ready) {
-      context.target.hidden = true;
-      context.target.setAttribute("aria-busy", "false");
-      context.original.hidden = false;
-      resetTranslationTrigger(context);
+    if (active.context.target.isConnected && !active.context.target.dataset.ready) {
+      active.context.target.hidden = true;
+      active.context.original.hidden = false;
+      active.context.trigger.setAttribute("aria-pressed", "false");
     }
   }
-  function renderLocalTranslation(text, code) {
+  function renderGoogleTranslation(text, code) {
     const direction = isRTL(code) ? "rtl" : "ltr";
-    return `<p class="lib-trans-label">Local AI · ${esc(languageName(code))}</p>${String(text).split(/\n{2,}/).map((paragraph) => `<p dir="${direction}" lang="${esc(code)}">${esc(paragraph)}</p>`).join("")}`;
+    return `<p class="lib-trans-label">Google Translate · ${esc(languageName(code))}</p>${String(text).split(/\n{2,}/).map((paragraph) => `<p dir="${direction}" lang="${esc(code)}">${esc(paragraph)}</p>`).join("")}`;
+  }
+  async function runGoogleTranslation(context, code = "en") {
+    cancelActiveTranslation();
+    const run = ++translationRun, controller = new AbortController();
+    activeTranslation = { context, controller, run };
+    context.target.hidden = false;
+    context.original.hidden = true;
+    context.target.removeAttribute("data-ready");
+    context.target.dir = isRTL(code) ? "rtl" : "ltr";
+    context.target.setAttribute("aria-busy", "true");
+    context.trigger.title = "Show original text";
+    context.trigger.setAttribute("aria-label", "Show original text");
+    context.trigger.setAttribute("aria-pressed", "true");
+    context.target.innerHTML = `<div class="lib-loading"><span class="spinner sm" aria-hidden="true"></span><span>Translating into ${esc(languageName(code))}…</span></div>`;
+    try {
+      const translated = await translateWithGoogle(context.source, code, "auto", controller.signal);
+      if (run !== translationRun || controller.signal.aborted) return;
+      context.target.innerHTML = renderGoogleTranslation(translated, code);
+      context.target.dataset.ready = "1";
+    } catch (error) {
+      if (run !== translationRun || controller.signal.aborted) return;
+      context.target.innerHTML = `<div class="notice error"><strong>Translation unavailable.</strong> ${esc(error.message || "Google Translate is currently unavailable.")}</div>`;
+    } finally {
+      if (run === translationRun) context.target.setAttribute("aria-busy", "false");
+      if (activeTranslation?.run === run) activeTranslation = null;
+    }
   }
   function showOriginalTranslation(context) {
-    cancelActiveTranslation();
+    cancelActiveTranslation(context.target);
     context.target.hidden = true;
     context.target.setAttribute("aria-busy", "false");
     context.original.hidden = false;
     resetTranslationTrigger(context);
   }
-  function openLanguagePopover(context) {
-    translationContext = context;
-    languageSelect.value = "";
-    languagePopover.hidden = false;
-    context.trigger.setAttribute("aria-expanded", "true");
-    const rect = context.trigger.getBoundingClientRect();
-    const width = Math.min(280, Math.max(0, window.innerWidth - 16));
-    languagePopover.style.width = `${width}px`;
-    const popoverRect = languagePopover.getBoundingClientRect();
-    const controlRect = languageSelectMount.getBoundingClientRect();
-    const controlTop = controlRect.top - popoverRect.top;
-    const spaceAbove = rect.top - popoverRect.height - 8 + controlTop - 14;
-    const spaceBelow = window.innerHeight - 8 - (rect.bottom + 8 + controlTop + controlRect.height + 6);
-    const listHeightAbove = Math.max(0, spaceAbove - 54);
-    const listHeightBelow = Math.max(0, spaceBelow - 54);
-    const opensUp = listHeightAbove > listHeightBelow;
-    const listHeight = Math.max(40, Math.min(230, opensUp ? listHeightAbove : listHeightBelow));
-    $(".cselect-list", languageSelectMount).style.maxHeight = `${listHeight}px`;
-    languagePopover.classList.toggle("opens-up", opensUp);
-    const maxLeft = Math.max(8, window.innerWidth - width - 8);
-    const left = Math.min(Math.max(8, rect.left), maxLeft);
-    const top = opensUp
-      ? Math.max(8, rect.top - popoverRect.height - 8)
-      : Math.min(rect.bottom + 8, Math.max(8, window.innerHeight - popoverRect.height - 8));
-    languagePopover.style.left = `${left}px`;
-    languagePopover.style.top = `${top}px`;
-    $(".cselect-btn", languageSelectMount)?.focus({ preventScroll: true });
-  }
-  function setTranslationLoading(context, run, message) {
-    if (run !== translationRun || !context.target.isConnected) return;
-    context.target.innerHTML = `<div class="lib-loading"><span class="spinner sm" aria-hidden="true"></span><span>${esc(message)}</span></div>`;
-  }
-  async function runLocalTranslation(context, code) {
-    cancelActiveTranslation();
-    const run = ++translationRun;
-    const controller = new AbortController();
-    activeTranslation = { context, controller, run };
-    context.target.hidden = false;
-    context.original.hidden = true;
-    context.target.removeAttribute("data-ready");
-    context.target.dataset.language = code;
-    context.target.dir = isRTL(code) ? "rtl" : "ltr";
-    context.target.setAttribute("aria-live", "polite");
-    context.target.setAttribute("aria-busy", "true");
-    context.trigger.title = "Show original text";
-    context.trigger.setAttribute("aria-label", "Show original text");
-    context.trigger.setAttribute("aria-pressed", "true");
-    setTranslationLoading(context, run, `Loading ${languageName(code)} translation…`);
-
-    try {
-      const ai = window.NurLocalAI;
-      if (!ai) throw new Error("Local AI is still loading. Please try again.");
-      const onProgress = (progress = {}) => {
-        const percent = Number.isFinite(Number(progress.progress)) ? Math.round(Number(progress.progress) * 100) : null;
-        const message = progress.text || "Loading the local model…";
-        setTranslationLoading(context, run, percent == null ? message : `${message} · ${percent}%`);
-      };
-      const readiness = await ai.init({ onProgress });
-      if (run !== translationRun || controller.signal.aborted) return;
-      if (!readiness.available) throw new Error(readiness.reason);
-      setTranslationLoading(context, run, `Translating into ${languageName(code)}…`);
-      const translated = await ai.translate(context.source, { code, name: languageName(code) }, {
-        signal: controller.signal,
-        onProgress,
-        onChunk: (index, total) => setTranslationLoading(
-          context,
-          run,
-          total > 1 ? `Translating passage · part ${index} of ${total}…` : `Translating into ${languageName(code)}…`,
-        ),
-      });
-      if (run !== translationRun || controller.signal.aborted) return;
-      context.target.innerHTML = renderLocalTranslation(translated, code);
-      context.target.dataset.ready = "1";
-      context.target.setAttribute("aria-busy", "false");
-    } catch (error) {
-      if (run !== translationRun || controller.signal.aborted) return;
-      try {
-        const fallback = await translateWithGoogle(context.source, code);
-        if (run !== translationRun || controller.signal.aborted) return;
-        context.target.innerHTML = renderLocalTranslation(fallback, code);
-        context.target.dataset.ready = "1";
-        context.target.setAttribute("aria-busy", "false");
-      } catch (fallbackError) {
-        context.target.innerHTML = `<div class="notice error"><strong>Translation unavailable.</strong> ${esc(fallbackError.message || error.message || "Local AI failed.")}</div>`;
-        context.target.setAttribute("aria-busy", "false");
-      }
-    } finally {
-      if (activeTranslation?.run === run) activeTranslation = null;
-    }
-  }
   function toggleLocalTranslation(source, original, target, trigger, event) {
     event?.stopPropagation();
     if (!original || !target || !trigger) return;
-    if (!languagePopover.hidden && translationContext?.trigger === trigger) {
-      closeLanguagePopover();
-      return;
-    }
-    const originalTitle = trigger.dataset.translationTitle || trigger.title;
+    const originalTitle = trigger.dataset.translationTitle || trigger.title || "Translate to English";
     const originalLabel = trigger.dataset.translationLabel || trigger.getAttribute("aria-label") || originalTitle;
     trigger.dataset.translationTitle = originalTitle;
     trigger.dataset.translationLabel = originalLabel;
     const context = { source: String(source || "").trim(), original, target, trigger, originalTitle, originalLabel };
-    if (!target.hidden) {
-      closeLanguagePopover();
-      showOriginalTranslation(context);
-      return;
-    }
-    original.hidden = false;
+    if (!target.hidden) { showOriginalTranslation(context); return; }
     if (!context.source) {
       target.hidden = false;
       target.innerHTML = `<div class="notice">There is no text available to translate.</div>`;
@@ -1924,163 +1826,33 @@ const APP = (() => {
       trigger.setAttribute("aria-pressed", "true");
       return;
     }
-    openLanguagePopover(context);
+    runGoogleTranslation(context, "en");
   }
-  const languageSelect = makeSelect(languageSelectMount, {
-    options: LANGUAGES.map(({ code, name }) => ({ value: code, label: name })),
-    value: "",
-    placeholder: "Choose a language",
-    onChange: (code) => {
-      if (!code || !translationContext) return;
-      const context = translationContext;
-      closeLanguagePopover();
-      runLocalTranslation(context, code);
-    },
-  });
-  $(".cselect-btn", languageSelectMount).setAttribute("aria-label", "Choose a translation language");
-  $(".cselect-search", languageSelectMount)?.setAttribute("aria-label", "Search languages");
-  document.addEventListener("click", (event) => {
-    if (languagePopover.hidden || languagePopover.contains(event.target) || event.target.closest(".local-translate-trigger")) return;
-    closeLanguagePopover();
-  });
-  window.addEventListener("resize", closeLanguagePopover);
 
-  const CHAT_SYSTEM = [
-    "You are Nōr AI, a careful study assistant for Qur'an, Hadith, classical Tafseer, and Islamic studies.",
-    "Be respectful and clear. Do not invent quotations, references, or scholarly consensus; say when you are uncertain.",
-    "Distinguish explanation from a religious ruling. Do not issue fatwas; encourage consulting a qualified scholar for personal rulings.",
-    "Preserve the distinctions and established usage of Fiqh, Aqeedah, Tafseer, Uthmani, Madhhab, Hadith, Sunnah, and Isnad.",
-    "You have no live web access. Do not imply you checked a source unless the user supplied it.",
-  ].join(" ");
-  const chatToggle = $("#ai-chat-toggle"), chatPanel = $("#ai-chat-panel");
-  const chatProgress = $("#ai-chat-progress"), chatProgressText = $("#ai-chat-progress-text");
-  const chatProgressPercent = $("#ai-chat-progress-percent"), chatProgressTrack = $("#ai-chat-progress-track");
-  const chatProgressFill = $("#ai-chat-progress-fill"), chatRetry = $("#ai-chat-retry");
-  const chatMessagesEl = $("#ai-chat-messages"), chatForm = $("#ai-chat-form");
-  const chatInput = $("#ai-chat-input"), chatSend = $("#ai-chat-send");
-  let chatInitTask = null, chatReady = false, chatBusy = false;
-  const chatHistory = [];
-
-  function setChatProgress(progress = {}) {
-    const percent = Number.isFinite(Number(progress.progress)) ? Math.round(Number(progress.progress) * 100) : null;
-    chatProgress.hidden = false;
-    chatProgressText.textContent = progress.text || (percent == null ? "Loading local model…" : `Downloading local model · ${percent}%`);
-    chatProgressPercent.textContent = percent == null ? "" : `${percent}%`;
-    chatProgressTrack.setAttribute("aria-valuenow", String(percent ?? 0));
-    chatProgressFill.style.width = percent == null ? "30%" : `${Math.max(0, Math.min(100, percent))}%`;
-  }
-  function addChatMessage(role, text = "") {
-    const message = document.createElement("article");
-    message.className = `ai-chat-message ${role}`;
-    message.setAttribute("aria-label", role === "user" ? "You" : "Nōr AI");
-    message.textContent = text;
-    chatMessagesEl.appendChild(message);
-    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
-    return message;
-  }
-  async function initializeChat() {
-    if (chatReady || chatInitTask) return chatInitTask;
-    if (!window.NurLocalAI) {
-      chatProgress.hidden = false;
-      chatProgressText.textContent = "Preparing the local AI module…";
-      return;
-    }
-    chatRetry.hidden = true;
-    chatProgress.hidden = false;
-    chatProgressText.textContent = "Checking WebGPU support…";
-    chatInitTask = window.NurLocalAI.init({ onProgress: setChatProgress });
+  const translateToggle = $("#translate-toggle"), translatePanel = $("#translate-panel");
+  const sourceLanguage = $("#translate-source"), targetLanguage = $("#translate-target");
+  const translateInput = $("#translate-input"), translateOutput = $("#translate-output");
+  sourceLanguage.innerHTML = `<option value="auto">Detect language</option>` + LANGUAGES.map(({ code, name }) => `<option value="${esc(code)}">${esc(name)}</option>`).join("");
+  targetLanguage.innerHTML = LANGUAGES.map(({ code, name }) => `<option value="${esc(code)}">${esc(name)}</option>`).join("");
+  targetLanguage.value = "en";
+  translateToggle.onclick = () => {
+    translatePanel.hidden = !translatePanel.hidden;
+    translateToggle.setAttribute("aria-expanded", String(!translatePanel.hidden));
+  };
+  $("#translate-close").onclick = closeLanguagePopover;
+  $("#translate-submit").onclick = async () => {
+    const text = translateInput.value.trim();
+    if (!text) { translateOutput.textContent = "Enter text to translate."; return; }
+    translateOutput.textContent = "Translating…";
     try {
-      const result = await chatInitTask;
-      if (!result.available) {
-        chatProgressText.textContent = result.reason;
-        chatRetry.hidden = true;
-        return;
-      }
-      chatReady = true;
-      chatProgress.hidden = true;
-      chatInput.disabled = false;
-      chatSend.disabled = false;
-      if (!chatMessagesEl.childElementCount) {
-        addChatMessage("assistant", "As-salāmu ʿalaykum. I can help you study, but please verify important religious answers with qualified sources.");
-      }
-      if (!chatBusy) chatInput.focus();
+      const translated = await translateWithGoogle(text, targetLanguage.value, sourceLanguage.value);
+      translateOutput.textContent = translated;
+      translateOutput.dir = isRTL(targetLanguage.value) ? "rtl" : "ltr";
     } catch (error) {
-      chatProgressText.textContent = error.message || "The local model could not be loaded.";
-      chatRetry.hidden = false;
-    } finally {
-      chatInitTask = null;
+      translateOutput.textContent = error.message || "Google Translate is currently unavailable.";
     }
-  }
-  chatToggle.addEventListener("click", () => {
-    if (chatPanel.hidden) {
-      chatPanel.hidden = false;
-      chatToggle.setAttribute("aria-expanded", "true");
-      initializeChat();
-    } else if (chatReady) {
-      chatInput.focus();
-    }
-  });
-  $("#ai-chat-close").addEventListener("click", () => {
-    chatPanel.hidden = true;
-    chatToggle.setAttribute("aria-expanded", "false");
-  });
-  $("#ai-chat-retry").addEventListener("click", initializeChat);
-  window.addEventListener("nur-local-ai-ready", () => {
-    if (!chatPanel.hidden) initializeChat();
-  });
-  chatForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const prompt = chatInput.value.trim();
-    if (!prompt || !chatReady || chatBusy) return;
-    chatInput.value = "";
-    addChatMessage("user", prompt);
-    chatHistory.push({ role: "user", content: prompt });
-    chatBusy = true;
-    chatInput.disabled = true;
-    chatSend.disabled = true;
-    const responseNode = addChatMessage("assistant");
-    try {
-      const messages = chatHistory.slice(-10);
-      let response = "";
-      try {
-        response = await askHostedChat(messages, {
-          system: CHAT_SYSTEM,
-          maxTokens: 512,
-        });
-      } catch (hostError) {
-        if (!window.NurLocalAI) {
-          throw hostError;
-        }
-        response = await window.NurLocalAI.ask(messages, {
-          system: CHAT_SYSTEM,
-          maxTokens: 512,
-          onToken: (token) => {
-            responseNode.appendChild(document.createTextNode(token));
-            chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
-          },
-        });
-      }
-      if (!response) throw new Error("The AI service returned an empty answer.");
-      responseNode.textContent = response;
-      chatHistory.push({ role: "assistant", content: response });
-    } catch (error) {
-      const message = String(error?.message || "");
-      const limitReached = /limit|quota|429|rate limit|billing|too many requests|exhausted|overload/i.test(message);
-      responseNode.textContent = limitReached ? "Our limit has been reached. I am sorry" : (message || "The local model could not complete that answer.");
-      responseNode.classList.add("error");
-    } finally {
-      chatBusy = false;
-      chatInput.disabled = !chatReady;
-      chatSend.disabled = !chatReady;
-      if (!chatPanel.hidden) chatInput.focus();
-    }
-  });
-  chatInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      chatForm.requestSubmit();
-    }
-  });
+  };
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeLanguagePopover(); });
 
   const toTop = $("#to-top"); window.addEventListener("scroll", () => toTop.classList.toggle("show", window.scrollY > 500)); toTop.onclick = () => window.scrollTo({ top: 0, behavior: "smooth" });
 

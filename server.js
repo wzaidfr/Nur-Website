@@ -17,7 +17,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as turath from "turath-sdk";
-import { buildOpenRouterHeaders, extractOpenRouterText, getModelList, parseOpenRouterError } from "./ai-provider.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -206,7 +205,7 @@ app.use((req, res, next) => {
 
 const sendOpts = { headers: { "Cache-Control": "no-cache" } };
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "index.html"), sendOpts));
-for (const file of ["index.html", "script.js", "style.css", "local-ai.js", "ai-worker.js"]) {
+for (const file of ["index.html", "script.js", "style.css"]) {
   app.get(`/${file}`, (req, res) => res.sendFile(path.join(__dirname, file), sendOpts));
 }
 app.get("/speech-sdk.js", (req, res) => res.sendFile(
@@ -217,80 +216,6 @@ app.get("/speech-sdk.js", (req, res) => res.sendFile(
 /* ---------- API ---------- */
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
-
-app.post("/api/ai/chat", async (req, res) => {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    res.status(503).json({
-      error: "OpenRouter is not configured. Add OPENROUTER_API_KEY to your .env file.",
-      configured: false,
-    });
-    return;
-  }
-
-  const incomingMessages = Array.isArray(req.body?.messages) ? req.body.messages : [{ role: "user", content: String(req.body?.prompt ?? req.body?.input ?? "") }];
-  const systemPrompt = typeof req.body?.system === "string" ? req.body.system : "";
-  const finalMessages = [...incomingMessages];
-  if (systemPrompt) {
-    const hasSystem = finalMessages.some((message) => message?.role === "system");
-    if (hasSystem) {
-      for (const message of finalMessages) {
-        if (message?.role === "system") message.content = systemPrompt;
-      }
-    } else {
-      finalMessages.unshift({ role: "system", content: systemPrompt });
-    }
-  }
-
-  const models = getModelList(process.env.OPENROUTER_MODELS);
-  const payload = {
-    temperature: Number(req.body?.temperature ?? 0.3),
-    max_tokens: Number(req.body?.maxTokens ?? 512),
-    messages: finalMessages.map((message) => ({
-      role: message?.role || "user",
-      content: String(message?.content ?? ""),
-    })),
-  };
-
-  let lastError = null;
-  for (const model of models) {
-    try {
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: buildOpenRouterHeaders({
-          apiKey,
-          siteUrl: process.env.OPENROUTER_SITE_URL || "http://localhost:3000",
-          appName: process.env.OPENROUTER_APP_NAME || "Nūr",
-        }),
-        body: JSON.stringify({ ...payload, model }),
-      });
-
-      const bodyText = await response.text();
-      if (!response.ok) {
-        const parsed = bodyText ? JSON.parse(bodyText) : null;
-        lastError = new Error(parseOpenRouterError(parsed, `OpenRouter model ${model} failed (${response.status}).`));
-        continue;
-      }
-
-      const json = bodyText ? JSON.parse(bodyText) : null;
-      const answer = extractOpenRouterText(json);
-      if (!answer) {
-        lastError = new Error(`OpenRouter returned an empty answer for ${model}.`);
-        continue;
-      }
-
-      res.json({ answer, model, provider: "openrouter", configured: true });
-      return;
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-    }
-  }
-
-  res.status(502).json({
-    error: lastError?.message || "No OpenRouter model could answer the request.",
-    configured: true,
-  });
-});
 
 app.get("/api/recitation/token", async (_req, res) => {
   const key = process.env.AZURE_SPEECH_KEY;

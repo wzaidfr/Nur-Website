@@ -1,5 +1,3 @@
-import { buildOpenRouterHeaders, extractOpenRouterText, getModelList, parseOpenRouterError } from "./ai-provider.js";
-
 const API_BASE = "https://api.turath.io";
 const FILES_BASE = "https://files.turath.io/books";
 const CORS_HEADERS = {
@@ -125,74 +123,6 @@ export default {
 
     if (url.pathname === "/api/health") {
       return jsonResponse({ ok: true, service: "nur-worker", mode: "cloudflare" });
-    }
-
-    if (url.pathname === "/api/ai/chat" && request.method === "POST") {
-      try {
-        const apiKey = env?.OPENROUTER_API_KEY || "";
-        if (!apiKey) {
-          return jsonResponse({ error: "OpenRouter is not configured on this worker.", configured: false }, { status: 503 });
-        }
-
-        const body = await request.json().catch(() => ({}));
-        const incomingMessages = Array.isArray(body?.messages) ? body.messages : [{ role: "user", content: String(body?.prompt ?? body?.input ?? "") }];
-        const systemPrompt = typeof body?.system === "string" ? body.system : "";
-        const messages = [...incomingMessages];
-        if (systemPrompt) {
-          const systemIndex = messages.findIndex((message) => message?.role === "system");
-          if (systemIndex >= 0) messages[systemIndex] = { ...messages[systemIndex], content: systemPrompt };
-          else messages.unshift({ role: "system", content: systemPrompt });
-        }
-
-        const modelList = getModelList(env?.OPENROUTER_MODELS || "");
-        let lastError = null;
-
-        for (const model of modelList) {
-          try {
-            const payload = {
-              model,
-              temperature: Number(body?.temperature ?? 0.3),
-              max_tokens: Number(body?.maxTokens ?? 512),
-              messages: messages.map((message) => ({
-                role: message?.role || "user",
-                content: String(message?.content ?? ""),
-              })),
-            };
-
-            const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-              method: "POST",
-              headers: buildOpenRouterHeaders({
-                apiKey,
-                siteUrl: env?.OPENROUTER_SITE_URL || "https://nur-website.zaidmailacc.workers.dev",
-                appName: env?.OPENROUTER_APP_NAME || "Nūr",
-              }),
-              body: JSON.stringify(payload),
-            });
-
-            const text = await response.text();
-            if (!response.ok) {
-              const parsed = text ? JSON.parse(text) : null;
-              lastError = new Error(parseOpenRouterError(parsed, `OpenRouter model ${model} failed (${response.status}).`));
-              continue;
-            }
-
-            const json = text ? JSON.parse(text) : null;
-            const answer = extractOpenRouterText(json);
-            if (!answer) {
-              lastError = new Error(`OpenRouter returned an empty answer for ${model}.`);
-              continue;
-            }
-
-            return jsonResponse({ answer, model, provider: "openrouter", configured: true });
-          } catch (error) {
-            lastError = error instanceof Error ? error : new Error(String(error));
-          }
-        }
-
-        return jsonResponse({ error: lastError?.message || "No OpenRouter model could answer this request.", configured: true }, { status: 502 });
-      } catch (error) {
-        return jsonResponse({ error: error?.message || "OpenRouter chat failed.", configured: true }, { status: 502 });
-      }
     }
 
     if (url.pathname === "/api/turath/catalog") {
