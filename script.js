@@ -100,21 +100,40 @@ const APP = (() => {
     }
     return res.json();
   }
-  async function translateWithGoogle(text, code, sourceCode = "auto", signal) {
+  async function translateText(text, targetCode, sourceCode = "auto", signal) {
     const source = String(text ?? "").trim();
     if (!source) throw new Error("There is no text to translate.");
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(sourceCode)}&tl=${encodeURIComponent(code)}&dt=t&q=${encodeURIComponent(source)}`;
-    const response = await fetch(url, {
-      signal,
-      headers: {
-        Accept: "application/json",
-      },
-    });
-    if (!response.ok) throw new Error("Google Translate is currently unavailable.");
-    const data = await response.json();
-    const translated = Array.isArray(data?.[0]) ? data[0].map((part) => part?.[0] || "").join("") : "";
-    if (!translated) throw new Error("Google Translate returned no text.");
-    return translated;
+    const chunks = [];
+    for (let start = 0; start < source.length;) {
+      let end = Math.min(start + 4500, source.length);
+      if (end < source.length) {
+        const boundary = source.lastIndexOf(" ", end);
+        if (boundary > start) end = boundary + 1;
+      }
+      chunks.push(source.slice(start, end));
+      start = end;
+    }
+
+    const translated = [];
+    for (const chunk of chunks) {
+      let result;
+      try {
+        result = await getJSON(`${TURATH_BASE}/api/translate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({ text: chunk, target: targetCode, source: sourceCode }),
+          signal,
+        });
+      } catch (error) {
+        if (error.name === "TypeError") {
+          throw new Error("Could not connect to the translation service. Check your connection and try again.");
+        }
+        throw error;
+      }
+      if (!result.translatedText) throw new Error("The translation service returned no text.");
+      translated.push(result.translatedText);
+    }
+    return translated.join(" ");
   }
   const memo = (key, fn) => (cache[key] ??= fn().catch((e) => { delete cache[key]; throw e; }));
   function mount(id) { app.replaceChildren(document.getElementById(id).content.cloneNode(true)); }
@@ -1771,11 +1790,11 @@ const APP = (() => {
       active.context.trigger.setAttribute("aria-pressed", "false");
     }
   }
-  function renderGoogleTranslation(text, code) {
+  function renderTranslation(text, code) {
     const direction = isRTL(code) ? "rtl" : "ltr";
-    return `<p class="lib-trans-label">Google Translate · ${esc(languageName(code))}</p>${String(text).split(/\n{2,}/).map((paragraph) => `<p dir="${direction}" lang="${esc(code)}">${esc(paragraph)}</p>`).join("")}`;
+    return `<p class="lib-trans-label">Translate · ${esc(languageName(code))}</p>${String(text).split(/\n{2,}/).map((paragraph) => `<p dir="${direction}" lang="${esc(code)}">${esc(paragraph)}</p>`).join("")}`;
   }
-  async function runGoogleTranslation(context, code = "en") {
+  async function runTranslation(context, code = "en") {
     cancelActiveTranslation();
     const run = ++translationRun, controller = new AbortController();
     activeTranslation = { context, controller, run };
@@ -1789,13 +1808,13 @@ const APP = (() => {
     context.trigger.setAttribute("aria-pressed", "true");
     context.target.innerHTML = `<div class="lib-loading"><span class="spinner sm" aria-hidden="true"></span><span>Translating into ${esc(languageName(code))}…</span></div>`;
     try {
-      const translated = await translateWithGoogle(context.source, code, "auto", controller.signal);
+      const translated = await translateText(context.source, code, "auto", controller.signal);
       if (run !== translationRun || controller.signal.aborted) return;
-      context.target.innerHTML = renderGoogleTranslation(translated, code);
+      context.target.innerHTML = renderTranslation(translated, code);
       context.target.dataset.ready = "1";
     } catch (error) {
       if (run !== translationRun || controller.signal.aborted) return;
-      context.target.innerHTML = `<div class="notice error"><strong>Translation unavailable.</strong> ${esc(error.message || "Google Translate is currently unavailable.")}</div>`;
+      context.target.innerHTML = `<div class="notice error"><strong>Translation unavailable.</strong> ${esc(error.message || "The translation service is currently unavailable.")}</div>`;
     } finally {
       if (run === translationRun) context.target.setAttribute("aria-busy", "false");
       if (activeTranslation?.run === run) activeTranslation = null;
@@ -1826,15 +1845,22 @@ const APP = (() => {
       trigger.setAttribute("aria-pressed", "true");
       return;
     }
-    runGoogleTranslation(context, "en");
+    runTranslation(context, "en");
   }
 
   const translateToggle = $("#translate-toggle"), translatePanel = $("#translate-panel");
-  const sourceLanguage = $("#translate-source"), targetLanguage = $("#translate-target");
   const translateInput = $("#translate-input"), translateOutput = $("#translate-output");
-  sourceLanguage.innerHTML = `<option value="auto">Detect language</option>` + LANGUAGES.map(({ code, name }) => `<option value="${esc(code)}">${esc(name)}</option>`).join("");
-  targetLanguage.innerHTML = LANGUAGES.map(({ code, name }) => `<option value="${esc(code)}">${esc(name)}</option>`).join("");
-  targetLanguage.value = "en";
+  const languageOptions = LANGUAGES.map(({ code, name }) => ({ value: code, label: name }));
+  const sourceLanguage = makeSelect($("#translate-source-mount"), {
+    options: [{ value: "auto", label: "Detect language" }, ...languageOptions],
+    value: "auto",
+    placeholder: "Detect language",
+  });
+  const targetLanguage = makeSelect($("#translate-target-mount"), {
+    options: languageOptions,
+    value: "en",
+    placeholder: "Choose a language",
+  });
   translateToggle.onclick = () => {
     translatePanel.hidden = !translatePanel.hidden;
     translateToggle.setAttribute("aria-expanded", String(!translatePanel.hidden));
@@ -1845,11 +1871,11 @@ const APP = (() => {
     if (!text) { translateOutput.textContent = "Enter text to translate."; return; }
     translateOutput.textContent = "Translating…";
     try {
-      const translated = await translateWithGoogle(text, targetLanguage.value, sourceLanguage.value);
+      const translated = await translateText(text, targetLanguage.value, sourceLanguage.value);
       translateOutput.textContent = translated;
       translateOutput.dir = isRTL(targetLanguage.value) ? "rtl" : "ltr";
     } catch (error) {
-      translateOutput.textContent = error.message || "Google Translate is currently unavailable.";
+      translateOutput.textContent = error.message || "The translation service is currently unavailable.";
     }
   };
   document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeLanguagePopover(); });

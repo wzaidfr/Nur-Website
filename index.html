@@ -69,14 +69,14 @@
   <audio id="shared-audio" preload="none"></audio>
   <div id="word-tip" class="word-tip" hidden></div>
 
-  <button id="translate-toggle" class="translate-toggle" type="button" aria-controls="translate-panel" aria-expanded="false" aria-label="Open translator">
-    <span aria-hidden="true">文</span><span>Translate</span>
+  <button id="translate-toggle" class="translate-toggle" type="button" title="Translate" aria-controls="translate-panel" aria-expanded="false" aria-label="Open Translate">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h8M8 5c0 5-1.5 9-4 11"/><path d="M5 10c1.5 3 4 5.5 7 7"/><path d="M13 20l4-10 4 10"/><path d="M14.5 16h5"/></svg>
   </button>
   <aside id="translate-panel" class="translate-panel" aria-label="Translator" hidden>
-    <header><strong>Google Translate</strong><button id="translate-close" type="button" aria-label="Close translator">×</button></header>
+    <header><strong>Translate</strong><button id="translate-close" type="button" title="Close" aria-label="Close translator">×</button></header>
     <div class="translate-languages">
-      <label>From<select id="translate-source"></select></label>
-      <label>To<select id="translate-target"></select></label>
+      <label>From<div id="translate-source-mount"></div></label>
+      <label>To<div id="translate-target-mount"></div></label>
     </div>
     <textarea id="translate-input" rows="4" placeholder="Enter text to translate"></textarea>
     <button id="translate-submit" class="btn btn-primary" type="button">Translate</button>

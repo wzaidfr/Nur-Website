@@ -2,8 +2,8 @@ const API_BASE = "https://api.turath.io";
 const FILES_BASE = "https://files.turath.io/books";
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
   "Cache-Control": "no-store",
 };
 
@@ -123,6 +123,51 @@ export default {
 
     if (url.pathname === "/api/health") {
       return jsonResponse({ ok: true, service: "nur-worker", mode: "cloudflare" });
+    }
+
+    if (url.pathname === "/api/translate" && request.method === "POST") {
+      let body;
+      try { body = await request.json(); }
+      catch { return jsonResponse({ error: "Request body must be valid JSON." }, { status: 400 }); }
+
+      const text = typeof body?.text === "string" ? body.text.trim() : "";
+      const target = String(body?.target ?? "").trim();
+      const source = String(body?.source ?? "auto").trim();
+      const validLanguage = (code) => /^[a-z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$/i.test(code);
+      if (!text) return jsonResponse({ error: "Enter text to translate." }, { status: 400 });
+      if (text.length > 5000) return jsonResponse({ error: "Text must be 5,000 characters or fewer." }, { status: 400 });
+      if (!validLanguage(target) || (source !== "auto" && !validLanguage(source))) {
+        return jsonResponse({ error: "Choose valid source and target languages." }, { status: 400 });
+      }
+
+      const translationUrl = new URL("https://translate.googleapis.com/translate_a/single");
+      translationUrl.search = new URLSearchParams({ client: "gtx", sl: source, tl: target, dt: "t", q: text }).toString();
+      let response;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          response = await fetch(translationUrl, {
+            headers: { Accept: "application/json" },
+            signal: AbortSignal.timeout(15000),
+          });
+          if (response.ok || (response.status < 500 && response.status !== 429)) break;
+        } catch (error) {
+          if (attempt === 1) {
+            console.error("[translate] Upstream request failed:", error.message || error);
+            return jsonResponse({ error: "The translation service could not be reached. Please try again." }, { status: 502 });
+          }
+        }
+        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+
+      if (!response.ok) {
+        return jsonResponse({ error: `The translation service returned ${response.status}. Please try again.` }, { status: 502 });
+      }
+      let data;
+      try { data = await response.json(); }
+      catch { return jsonResponse({ error: "The translation service returned an invalid response." }, { status: 502 }); }
+      const translatedText = Array.isArray(data?.[0]) ? data[0].map((part) => part?.[0] || "").join("") : "";
+      if (!translatedText) return jsonResponse({ error: "The translation service returned no text." }, { status: 502 });
+      return jsonResponse({ translatedText });
     }
 
     if (url.pathname === "/api/turath/catalog") {

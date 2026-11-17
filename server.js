@@ -195,9 +195,14 @@ app.use((req, res, next) => {
   if (origin === "null" || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin || "")) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   }
-  res.setHeader("Access-Control-Allow-Methods", "GET");
   res.setHeader("X-Content-Type-Options", "nosniff");
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
   next();
 });
 
@@ -216,6 +221,45 @@ app.get("/speech-sdk.js", (req, res) => res.sendFile(
 /* ---------- API ---------- */
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
+
+app.post("/api/translate", handle(async (req) => {
+  const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+  const target = String(req.body?.target ?? "").trim();
+  const source = String(req.body?.source ?? "auto").trim();
+  const validLanguage = (code) => /^[a-z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$/i.test(code);
+  if (!text) throw httpError(400, "Enter text to translate.");
+  if (text.length > 5000) throw httpError(400, "Text must be 5,000 characters or fewer.");
+  if (!validLanguage(target) || (source !== "auto" && !validLanguage(source))) {
+    throw httpError(400, "Choose valid source and target languages.");
+  }
+
+  const url = new URL("https://translate.googleapis.com/translate_a/single");
+  url.search = new URLSearchParams({ client: "gtx", sl: source, tl: target, dt: "t", q: text }).toString();
+  let response;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      response = await fetch(url, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (response.ok || (response.status < 500 && response.status !== 429)) break;
+    } catch (error) {
+      if (attempt === 1) {
+        console.error("[translate] Upstream request failed:", error.message || error);
+        throw httpError(502, "The translation service could not be reached. Please try again.");
+      }
+    }
+    if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  if (!response.ok) throw httpError(502, `The translation service returned ${response.status}. Please try again.`);
+  let data;
+  try { data = await response.json(); }
+  catch { throw httpError(502, "The translation service returned an invalid response."); }
+  const translatedText = Array.isArray(data?.[0]) ? data[0].map((part) => part?.[0] || "").join("") : "";
+  if (!translatedText) throw httpError(502, "The translation service returned no text.");
+  return { translatedText };
+}));
 
 app.get("/api/recitation/token", async (_req, res) => {
   const key = process.env.AZURE_SPEECH_KEY;
